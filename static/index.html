@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BIS Assistant — Backend Tester</title>
+<style>
+  :root{--bg:#f8fafc;--card:#fff;--line:#e2e8f0;--text:#0f172a;--muted:#64748b;--accent:#0ea5e9;--accent2:#0284c7;--ok:#16a34a;--warn:#d97706;--err:#dc2626;--radius:12px}
+  *{box-sizing:border-box} body{margin:0;font-family:ui-sans,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--text);line-height:1.5}
+  header{position:sticky;top:0;z-index:10;background:rgba(248,250,252,.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .wrap{max-width:960px;margin:0 auto;padding:16px 20px}
+  h1{font-size:18px;margin:0;display:flex;align-items:center;gap:10px}
+  h1 span.badge{font-size:11px;font-weight:600;letter-spacing:.04em;background:#0f172a;color:#fff;padding:3px 8px;border-radius:999px}
+  .sub{color:var(--muted);font-size:13px;margin-top:4px}
+  .grid{display:grid;grid-template-columns:1fr;gap:16px;margin-top:16px}
+  @media(min-width:900px){.grid{grid-template-columns:1.15fr .85fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .card h2{font-size:13px;margin:0 0 10px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+  label{font-size:12px;color:var(--muted);font-weight:600}
+  textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;resize:vertical;background:#fff;color:var(--text);outline:none}
+  textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(14,165,233,.15)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  button{border:0;border-radius:10px;padding:9px 14px;font-weight:600;font-size:13px;cursor:pointer}
+  .primary{background:var(--accent);color:#fff} .primary:hover{background:var(--accent2)} .primary:disabled{opacity:.5;cursor:not-allowed}
+  .ghost{background:#f1f5f9;color:var(--text);border:1px solid var(--line)} .ghost:hover{background:#e2e8f0}
+  .ghost.small{padding:6px 10px;font-size:11px;border-radius:999px}
+  .ghost.active{background:var(--text);color:#fff;border-color:var(--text)}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted)}
+  .pill b{color:var(--text)} .pill.ok{border-color:#bbf7d0;background:#f0fdf4} .pill.warn{border-color:#fde68a;background:#fffbeb} .pill.err{border-color:#fecaca;background:#fef2f2}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  .dot.ok{background:var(--ok);box-shadow:0 0 0 4px rgba(22,163,74,.15)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)}
+  .health{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+  .examples{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .answer{white-space:pre-wrap;font-size:14px;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px;min-height:80px}
+  .cites{font-size:12px;color:var(--muted)} .cites a{color:var(--accent2);text-decoration:none} .cites a:hover{text-decoration:underline}
+  .cites li{margin:4px 0}
+  .meta{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .raw{margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .raw summary{cursor:pointer;padding:8px 12px;font-size:12px;background:#f1f5f9;list-style:none;display:flex;justify-content:space-between;align-items:center}
+  .raw summary::after{content:'▾'} .raw[open] summary::after{content:'▴'}
+  .raw pre{margin:0;padding:12px;background:#0f172a;color:#e2e8f0;font-size:11px;overflow:auto;max-height:300px}
+  .hist{font-size:12px;color:var(--muted)} .hist a{color:var(--accent2);cursor:pointer;text-decoration:none} .hist a:hover{text-decoration:underline}
+  .foot{color:var(--muted);font-size:11px;margin-top:16px;padding-top:12px;border-top:1px dashed var(--line)}
+  .kbd{font-family:ui-monospace,monospace;font-size:11px;background:#f1f5f9;border:1px solid var(--line);border-bottom-width:2px;padding:1px 6px;border-radius:6px}
+  input.ep{flex:1;min-width:220px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:12px;background:#fff}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <h1>BIS Intelligent Assistant <span class="badge">SIH26107</span> <span style="font-weight:400;color:var(--muted);font-size:12px">— Backend Tester</span></h1>
+      <div class="sub">Simple tester for <span class="kbd">GET /health</span> and <span class="kbd">POST /query</span> · LangGraph + Chroma + Groq</div>
+    </div>
+    <div class="health" id="healthBox"><span class="dot" id="healthDot"></span><span id="healthText">checking…</span> <span id="healthUrl" style="font-size:11px;color:var(--muted)"></span></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="grid">
+    <!-- Left: request -->
+    <div class="card">
+      <h2>Request</h2>
+      <label>Backend URL</label>
+      <div class="row" style="margin-top:4px">
+        <input id="ep" class="ep" value="" placeholder="http://127.0.0.1:8000"/>
+        <button class="ghost small" id="btnHealth">Check /health</button>
+      </div>
+      <div style="margin-top:12px">
+        <label for="q">Query <span id="qlen" style="font-weight:400;color:var(--muted)">0 chars (min 3)</span></label>
+        <textarea id="q" rows="4" placeholder="e.g. I manufacture stainless steel pressure cookers — which BIS standard and scheme applies?"></textarea>
+      </div>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+        <label for="langSel" style="font-size:12px;color:var(--muted);font-weight:600">Language</label>
+        <select id="langSel" style="border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:12px;background:#fff">
+          <option value="en">English</option>
+          <option value="hi">हिन्दी</option>
+          <option value="te">తెలుగు</option>
+          <option value="ta">தமிழ்</option>
+        </select>
+        <span style="font-size:11px;color:var(--muted)">auto re-queries on change</span>
+      </div>
+      <div class="row">
+        <button id="ask" class="primary">Ask → POST /query</button>
+        <button id="clear" class="ghost">Clear</button>
+        <span id="lat" class="pill" style="display:none"></span>
+      </div>
+      <div class="examples" id="examples">
+        <button class="ghost small" data-q="What is IS 2347 and which products does it cover?">IS 2347</button>
+        <button class="ghost small" data-q="What does IS 4151 specify for helmets?">IS 4151 helmets</button>
+        <button class="ghost small" data-q="I manufacture stainless steel pressure cookers — which BIS standard and scheme applies?">Pressure cooker → standard</button>
+        <button class="ghost small" data-q="I want to sell LED bulbs in India — do I need CRS or ISI?">LED bulbs CRS?</button>
+        <button class="ghost small" data-q="What is the process for CRS (Scheme II) registration?">CRS process</button>
+        <button class="ghost small" data-q="How does a lab get BIS recognition under LRS 2018?">LRS lab</button>
+      </div>
+      <div class="hist" id="hist" style="margin-top:10px;display:none">
+        <div style="font-weight:600;color:var(--text);margin-bottom:4px">Recent</div>
+        <div id="histList"></div>
+      </div>
+      <div class="foot">Tip: Press <span class="kbd">Ctrl+Enter</span> to send. Health is checked on load and every 15s.</div>
+    </div>
+
+    <!-- Right: response -->
+    <div class="card" id="outCard" style="opacity:.6">
+      <h2>Response</h2>
+      <div class="meta" id="meta" style="display:none">
+        <span class="pill" id="qt">type: <b>—</b></span>
+        <span class="pill" id="fb">fallback: <b>—</b></span>
+        <span class="pill" id="status">status: <b>—</b></span>
+      </div>
+      <div class="answer" id="ans">No query yet — send one to see the backend response here. The raw JSON will appear below for easy copy/paste testing.</div>
+      <div id="cites" class="cites" style="margin-top:10px"></div>
+      <details class="raw" id="rawBox" style="display:none">
+        <summary><span>Raw JSON — <span id="rawStatus">—</span></span><span style="font-size:11px;color:var(--muted)">click to expand</span></summary>
+        <pre id="raw"></pre>
+      </details>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="ghost small" id="listenBtn" style="display:none">🔊 Listen</button>
+        <button class="ghost small" id="copyAns" style="display:none">Copy answer</button>
+        <button class="ghost small" id="copyRaw" style="display:none">Copy JSON</button>
+      </div>
+      <audio id="audioEl" style="display:none" controls></audio>
+    </div>
+  </div>
+
+  <div class="foot">
+    Endpoints: <span class="kbd">GET /health</span> → <code>{"status":"ok"}</code> &nbsp; <span class="kbd">POST /query</span> body <code>{"query":"..."}</code> → <code>{"answer","citations","query_type","used_live_fallback"}</code> · Single-file tester, no build step, plain <code>fetch()</code>.
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const ep = $('#ep'), q = $('#q'), qlen = $('#qlen'), ask = $('#ask'), clear = $('#clear'), lat = $('#lat');
+const healthDot = $('#healthDot'), healthText = $('#healthText'), healthUrl = $('#healthUrl'), btnHealth = $('#btnHealth');
+const qt = $('#qt'), fb = $('#fb'), statusPill = $('#status'), meta = $('#meta'), ans = $('#ans'), cites = $('#cites'), raw = $('#raw'), rawBox = $('#rawBox'), rawStatus = $('#rawStatus'), outCard = $('#outCard');
+const copyAns = $('#copyAns'), copyRaw = $('#copyRaw'), hist = $('#hist'), histList = $('#histList');
+const listenBtn = $('#listenBtn'), audioEl = $('#audioEl'), langSel = $('#langSel');
+let lastRaw = '', lastAnswer = '', lastDisplayed = '', lastLang = 'en', lastQueryForLang = '', history = [];
+let audioBlobUrl = null;
+let isPlaying = false;
+
+// endpoint defaults to current origin
+ep.value = location.origin;
+healthUrl.textContent = ep.value;
+ep.addEventListener('change', () => { healthUrl.textContent = ep.value; checkHealth(); });
+ep.addEventListener('input', () => healthUrl.textContent = ep.value);
+
+function base(){ return (ep.value || location.origin).replace(/\/+$/,''); }
+
+async function checkHealth(){
+  healthDot.className='dot'; healthText.textContent='checking…';
+  try{
+    const r = await fetch(base()+'/health', {cache:'no-store'});
+    if(!r.ok) throw new Error(r.status+' '+r.statusText);
+    const j = await r.json();
+    healthDot.className='dot ok'; healthText.textContent='online · '+ (j.status||'ok');
+    healthText.style.color='var(--ok)';
+  }catch(e){
+    healthDot.className='dot err'; healthText.textContent='offline · '+ (e.message||'error'); healthText.style.color='var(--err)';
+  }
+}
+btnHealth.onclick = checkHealth;
+checkHealth(); setInterval(checkHealth, 15000);
+
+qlen.textContent = '0 chars (min 3)';
+q.addEventListener('input', ()=>{ const n=q.value.length; qlen.textContent=n+' chars (min 3)'; qlen.style.color = n>=3 ? 'var(--ok)' : 'var(--muted)'; });
+
+document.querySelectorAll('[data-q]').forEach(b=> b.onclick=()=>{
+  q.value=b.dataset.q; q.dispatchEvent(new Event('input')); q.focus();
+});
+
+clear.onclick = ()=>{ q.value=''; q.dispatchEvent(new Event('input')); q.focus(); };
+
+q.addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.ctrlKey||e.metaKey)) doAsk(); });
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmtAnswer(t){
+  // light formatting: **bold** -> <b>
+  let h = esc(t);
+  h = h.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+  return h;
+}
+
+async function doAsk(){
+  const query = q.value.trim();
+  if(query.length < 3){ q.focus(); q.style.borderColor='var(--err)'; setTimeout(()=>q.style.borderColor='',1200); return; }
+  ask.disabled=true; ask.textContent='Thinking…'; lat.style.display='none';
+  meta.style.display='none'; cites.innerHTML=''; rawBox.style.display='none';
+  outCard.style.opacity='.6'; ans.textContent='Loading…';
+  const t0 = performance.now();
+  try{
+    const r = await fetch(base()+'/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query})});
+    const t1 = performance.now();
+    const ms = Math.round(t1-t0);
+    lat.textContent = ms+' ms'; lat.style.display='';
+    rawStatus.textContent = r.status+' '+r.statusText+' · '+ms+' ms';
+    let j;
+    const text = await r.text();
+    try{ j = JSON.parse(text); } catch{ throw new Error(text.slice(0,400)); }
+    lastRaw = JSON.stringify(j,null,2);
+    lastAnswer = j.answer || '';
+    raw.textContent = lastRaw; rawBox.style.display=''; rawBox.open = false;
+    copyRaw.style.display=''; copyAns.style.display=''; listenBtn.style.display='';
+    if(!r.ok) throw new Error((j.detail ? JSON.stringify(j.detail) : text).slice(0,600));
+
+    // meta
+    meta.style.display=''; qt.innerHTML='type: <b>'+esc(j.query_type||'—')+'</b>';
+    const isFallback = !!j.used_live_fallback;
+    fb.innerHTML='fallback: <b>'+ (isFallback?'yes (live)':'no (chroma)') +'</b>';
+    fb.className = 'pill ' + (isFallback?'warn':'ok');
+    statusPill.innerHTML='status: <b>'+r.status+'</b>'; statusPill.className='pill ok';
+
+    ans.innerHTML = fmtAnswer(j.answer||'(no answer)');
+    outCard.style.opacity='1';
+
+    if(j.citations && j.citations.length){
+      cites.innerHTML = '<div style="font-weight:600;color:var(--text);margin-bottom:4px">Sources — '+j.citations.length+'</div><ol style="margin:0 0 0 18px;padding:0">'+ j.citations.map((c,i)=> `<li>[${i+1}] ${esc(c.source_title||'Untitled')} — <a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source_url)}</a></li>`).join('') +'</ol>';
+    } else {
+      cites.innerHTML = '<span style="color:var(--muted)">No citations returned.</span>';
+    }
+
+    // history
+    history.unshift({query, type:j.query_type, ms, at:new Date().toLocaleTimeString()});
+    history = history.slice(0,6);
+    renderHist();
+
+  }catch(e){
+    ans.innerHTML = '<span style="color:var(--err)">Error: '+esc(e.message||String(e))+'</span>';
+    outCard.style.opacity='1';
+    statusPill.innerHTML='status: <b>error</b>'; statusPill.className='pill err'; meta.style.display='';
+    if(lastRaw){ raw.textContent=lastRaw; rawBox.style.display=''; }
+  }finally{
+    ask.disabled=false; ask.textContent='Ask → POST /query';
+  }
+}
+ask.onclick = doAsk;
+
+function renderHist(){
+  if(!history.length){ hist.style.display='none'; return; }
+  hist.style.display=''; histList.innerHTML = history.map(h=> `<div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px dashed var(--line)"><a data-replay="${esc(h.query)}" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.query)}</a><span class="pill" style="padding:2px 6px">${esc(h.type)}</span><span style="font-size:11px">${h.ms}ms</span></div>`).join('');
+  histList.querySelectorAll('[data-replay]').forEach(a=> a.onclick=()=>{ q.value=a.dataset.replay; q.dispatchEvent(new Event('input')); doAsk(); window.scrollTo({top:0,behavior:'smooth'}); });
+}
+
+copyAns.onclick = async()=>{ try{ await navigator.clipboard.writeText(document.getElementById('ans').innerText); copyAns.textContent='Copied!'; setTimeout(()=>copyAns.textContent='Copy answer',1200);}catch{}};
+copyRaw.onclick = async()=>{ try{ await navigator.clipboard.writeText(lastRaw); copyRaw.textContent='Copied!'; setTimeout(()=>copyRaw.textContent='Copy JSON',1200);}catch{}};
+listenBtn.onclick = async()=>{
+  if(!lastAnswer || listenBtn.disabled) return;
+  const prev = listenBtn.textContent;
+  listenBtn.textContent = '⏳ Loading…';
+  listenBtn.disabled = true;
+  if(audioBlobUrl){ URL.revokeObjectURL(audioBlobUrl); audioBlobUrl=null; }
+  audioEl.pause();
+  try{
+    const r = await fetch(base()+'/speak', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text: lastAnswer, language: 'en'})});
+    if(!r.ok){ const t=await r.text(); throw new Error(t.slice(0,300)); }
+    const blob = await r.blob();
+    audioBlobUrl = URL.createObjectURL(blob);
+    audioEl.src = audioBlobUrl;
+    audioEl.style.display='block';
+    await audioEl.play();
+    listenBtn.textContent = '🔊 Playing…';
+    audioEl.onended = ()=>{ listenBtn.textContent=prev; listenBtn.disabled=false; };
+    audioEl.onerror = ()=>{ listenBtn.textContent=prev; listenBtn.disabled=false; };
+  }catch(e){
+    listenBtn.textContent = prev; listenBtn.disabled=false;
+    alert('Listen failed: '+(e.message||e));
+  }
+};
+</script>
+</body>
+</html>

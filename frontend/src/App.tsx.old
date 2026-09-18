@@ -1,0 +1,728 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { getHealth, postQuery, postSpeak, postTranscribe } from './api/client'
+import type { QueryResponse, TargetLanguage } from './api/types'
+
+type HealthState = 'checking' | 'ok' | 'offline'
+type ResponseState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string; raw?: string }
+  | { kind: 'success'; data: QueryResponse; status: number; ms: number; query: string }
+
+const EXAMPLES: { label: string; query: string }[] = [
+  { label: 'IS 2347', query: 'What is IS 2347 and which products does it cover?' },
+  { label: 'IS 4151 helmets', query: 'What does IS 4151 specify for helmets?' },
+  { label: 'Pressure cooker → standard', query: 'I manufacture stainless steel pressure cookers — which BIS standard and scheme applies?' },
+  { label: 'LED bulbs CRS?', query: 'I want to sell LED bulbs in India — do I need CRS or ISI?' },
+  { label: 'CRS process', query: 'What is the process for CRS (Scheme II) registration?' },
+  { label: 'LRS lab', query: 'How does a lab get BIS recognition under LRS 2018?' },
+]
+
+const LANG_OPTIONS: { value: TargetLanguage; label: string }[] = [
+  { value: 'en', label: 'English' },
+  { value: 'hi', label: 'हिन्दी' },
+  { value: 'te', label: 'తెలుగు' },
+  { value: 'ta', label: 'தமிழ்' },
+]
+
+function getDemoId(query: string): string | null {
+  const idx = EXAMPLES.findIndex((e) => e.query === query)
+  return idx >= 0 ? `demo_${idx}` : null
+}
+
+function useHealth() {
+  const [state, setState] = useState<HealthState>('checking')
+  const [detail, setDetail] = useState<string>('')
+  const check = useCallback(async (signal?: AbortSignal) => {
+    setState('checking')
+    try {
+      const j = await getHealth(signal)
+      setState('ok')
+      setDetail(j.status || 'ok')
+    } catch (e) {
+      setState('offline')
+      setDetail(e instanceof Error ? e.message : 'error')
+    }
+  }, [])
+  useEffect(() => {
+    const ac = new AbortController()
+    check(ac.signal)
+    const id = setInterval(() => check(), 15000)
+    return () => {
+      ac.abort()
+      clearInterval(id)
+    }
+  }, [check])
+  return { state, detail, check }
+}
+
+function Pill({ children, variant = 'default' }: { children: React.ReactNode; variant?: 'default' | 'ok' | 'warn' | 'err' }) {
+  const cls =
+    variant === 'ok'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : variant === 'warn'
+        ? 'border-amber-200 bg-amber-50 text-amber-700'
+        : variant === 'err'
+          ? 'border-red-200 bg-red-50 text-red-700'
+          : 'border-slate-200 bg-white text-slate-600'
+  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-medium ${cls}`}>{children}</span>
+}
+
+function Skeleton() {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-label="Loading answer">
+      <div className="h-4 w-3/4 animate-pulse rounded bg-slate-200" />
+      <div className="h-4 w-full animate-pulse rounded bg-slate-200" />
+      <div className="h-4 w-5/6 animate-pulse rounded bg-slate-200" />
+      <div className="h-24 w-full animate-pulse rounded-lg bg-slate-100" />
+    </div>
+  )
+}
+
+function fmtAnswer(t: string) {
+  const esc = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const withBold = esc.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  return withBold
+}
+
+export default function App() {
+  const health = useHealth()
+  const [query, setQuery] = useState('')
+  const [lang, setLang] = useState<TargetLanguage>('en')
+  const [resp, setResp] = useState<ResponseState>({ kind: 'idle' })
+  const [history, setHistory] = useState<{ q: string; type: string; ms: number; at: string }[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('bis_hist') || '[]')
+    } catch {
+      return []
+    }
+  })
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  // Voice input state
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [micError, setMicError] = useState<string | null>(null)
+  const [recordingSecs, setRecordingSecs] = useState(30)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<BlobPart[]>([])
+  const streamRef = useRef<MediaStream | null>(null)
+  const timerRef = useRef<number | null>(null)
+
+  const canSend = useMemo(() => query.trim().length >= 3, [query])
+  const charCount = query.length
+
+  const pushHistory = useCallback((q: string, type: string, ms: number) => {
+    setHistory((h) => {
+      const next = [{ q, type, ms, at: new Date().toLocaleTimeString() }, ...h].slice(0, 6)
+      localStorage.setItem('bis_hist', JSON.stringify(next))
+      return next
+    })
+  }, [])
+
+  const getSupportedMimeType = () => {
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+    for (const c of candidates) {
+      try {
+        if ((window as unknown as { MediaRecorder?: { isTypeSupported?: (t: string) => boolean } }).MediaRecorder?.isTypeSupported?.(c)) return c
+      } catch {}
+    }
+    return 'audio/webm'
+  }
+
+  const cleanupMic = useCallback(() => {
+    if (timerRef.current) {
+      window.clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+    try {
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+    } catch {}
+    streamRef.current = null
+    mediaRecorderRef.current = null
+    chunksRef.current = []
+  }, [])
+
+  const startRecording = async () => {
+    setMicError(null)
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicError('Microphone not supported in this browser — try Chrome/Edge on desktop.')
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      chunksRef.current = []
+      const mimeType = getSupportedMimeType()
+      const mr = new MediaRecorder(stream, { mimeType } as MediaRecorderOptions)
+      mediaRecorderRef.current = mr
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      mr.onstop = async () => {
+        // auto-stop timer
+        if (timerRef.current) {
+          window.clearInterval(timerRef.current)
+          timerRef.current = null
+        }
+        const blob = new Blob(chunksRef.current, { type: mr.mimeType || mimeType })
+        chunksRef.current = []
+        // cleanup mic stream immediately after stop (but keep isRecording false)
+        try { stream.getTracks().forEach((t) => t.stop()) } catch {}
+        streamRef.current = null
+        if (blob.size === 0) {
+          setMicError('No speech detected — try again, speak clearly near the mic.')
+          setIsRecording(false)
+          setIsTranscribing(false)
+          return
+        }
+        setIsRecording(false)
+        setIsTranscribing(true)
+        setMicError(null)
+        try {
+          const { text } = await postTranscribe(blob)
+          if (!text || text.trim().length === 0) {
+            setMicError('No speech detected — try again, speak clearly.')
+          } else {
+            setQuery(text.trim())
+            // focus and place cursor at end
+            requestAnimationFrame(() => {
+              textareaRef.current?.focus()
+              const len = text.trim().length
+              try { textareaRef.current?.setSelectionRange(len, len) } catch {}
+            })
+          }
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (msg.toLowerCase().includes('no speech')) setMicError(msg)
+          else setMicError(`Transcription failed: ${msg}`)
+        } finally {
+          setIsTranscribing(false)
+        }
+      }
+      mr.start(100)
+      setIsRecording(true)
+      setRecordingSecs(30)
+      // countdown + progress ring + auto-stop at 30s
+      timerRef.current = window.setInterval(() => {
+        setRecordingSecs((s) => {
+          if (s <= 1) {
+            // auto-stop
+            try { mr.state === 'recording' && mr.stop() } catch {}
+            return 0
+          }
+          return s - 1
+        })
+      }, 1000)
+      // auto-stop hard limit
+      window.setTimeout(() => {
+        try {
+          if (mr.state === 'recording') mr.stop()
+        } catch {}
+      }, 30000)
+    } catch (e: unknown) {
+      const name = (e as DOMException)?.name
+      if (name === 'NotAllowedError') setMicError('Microphone permission denied — allow mic in browser settings and try again.')
+      else if (name === 'NotFoundError') setMicError('No microphone found — connect a mic and try again.')
+      else setMicError(e instanceof Error ? e.message : 'Failed to access microphone')
+    }
+  }
+
+  const stopRecording = () => {
+    const mr = mediaRecorderRef.current
+    if (!mr) return
+    try {
+      if (mr.state === 'recording') mr.stop()
+    } catch {}
+    // onstop handler will do transcribing
+  }
+
+  const doAsk = useCallback(
+    async (overrideQuery?: string, overrideLang?: TargetLanguage) => {
+      const q = (overrideQuery ?? query).trim()
+      const targetLang = overrideLang ?? lang
+      if (q.length < 3) {
+        textareaRef.current?.focus()
+        textareaRef.current?.setAttribute('aria-invalid', 'true')
+        setTimeout(() => textareaRef.current?.removeAttribute('aria-invalid'), 1200)
+        return
+      }
+      // stop any playing audio before new query
+      handleStopInternal()
+      abortRef.current?.abort()
+      const ac = new AbortController()
+      abortRef.current = ac
+      setResp({ kind: 'loading' })
+      try {
+        const { data, status, ms } = await postQuery(q, targetLang, ac.signal)
+        setResp({ kind: 'success', data, status, ms, query: q })
+        pushHistory(q, data.query_type, ms)
+      } catch (e) {
+        if ((e as DOMException)?.name === 'AbortError') return
+        const msg = e instanceof Error ? e.message : String(e)
+        setResp({ kind: 'error', message: msg })
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [query, lang, pushHistory],
+  )
+
+  // Auto re-query when language changes and we have a successful response
+  const handleLangChange = (newLang: TargetLanguage) => {
+    setLang(newLang)
+    // stop any current audio before language switch
+    handleStopInternal()
+    if (resp.kind === 'success' && resp.query) {
+      // re-run with same query but new language
+      doAsk(resp.query, newLang)
+    }
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      doAsk()
+    }
+  }
+
+  const copy = async (text: string, btn: HTMLButtonElement) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      const prev = btn.textContent
+      btn.textContent = 'Copied!'
+      setTimeout(() => (btn.textContent = prev), 1200)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+  }
+
+  // Audio: unified Listen/Stop
+  const [isFetchingAudio, setIsFetchingAudio] = useState(false)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
+
+  const handleStopInternal = useCallback(() => {
+    try {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.currentTime = 0
+      }
+    } catch {}
+    setIsPlaying(false)
+    setIsFetchingAudio(false)
+  }, [])
+
+  const handleStop = useCallback(() => {
+    handleStopInternal()
+    // keep blobUrl for potential replay? but revoke on new play, not on stop
+  }, [handleStopInternal])
+
+  useEffect(() => {
+    return () => {
+      if (blobUrlRef.current) {
+        try { URL.revokeObjectURL(blobUrlRef.current) } catch {}
+      }
+      try { audioRef.current?.pause() } catch {}
+      cleanupMic()
+    }
+  }, [cleanupMic])
+
+  const handleListen = async (text: string, language: TargetLanguage) => {
+    if (!text?.trim()) return
+    // If already playing/fetching, stop first (prevent overlap) then start new
+    if (isFetchingAudio || isPlaying) {
+      handleStopInternal()
+      // revoke previous blob before new one
+      if (blobUrlRef.current) {
+        try { URL.revokeObjectURL(blobUrlRef.current) } catch {}
+        blobUrlRef.current = null
+      }
+      // if we were fetching, the fetch will be aborted via handleStopInternal? we need to abort postSpeak fetch
+      // For now, just reset and continue to new fetch
+    }
+
+    // Cache-first: try precached file for demo queries
+    const currentQuery = resp.kind === 'success' ? resp.query : query
+    const demoId = getDemoId(currentQuery)
+    if (demoId) {
+      const cacheUrl = `/audio_cache/${demoId}_${language}.mp3`
+      try {
+        const head = await fetch(cacheUrl, { method: 'HEAD' })
+        if (head.ok) {
+          // Use cached file directly, no need for POST /speak
+          if (blobUrlRef.current) {
+            try { URL.revokeObjectURL(blobUrlRef.current) } catch {}
+            blobUrlRef.current = null
+          }
+          if (!audioRef.current) {
+            audioRef.current = new Audio()
+            audioRef.current.onended = () => setIsPlaying(false)
+            audioRef.current.onerror = () => setIsPlaying(false)
+          } else {
+            audioRef.current.onended = () => setIsPlaying(false)
+            audioRef.current.onerror = () => setIsPlaying(false)
+          }
+          audioRef.current.src = cacheUrl
+          audioRef.current.currentTime = 0
+          setIsPlaying(true)
+          await audioRef.current.play().catch((err: unknown) => {
+            const m = err instanceof Error ? err.message : String(err)
+            throw new Error(m || 'Audio playback failed')
+          })
+          return
+        }
+      } catch {
+        // fall through to live TTS
+      }
+    }
+
+    setIsFetchingAudio(true)
+    try {
+      const blob = await postSpeak(text, language)
+      if (!blob || blob.size === 0) throw new Error('Empty audio response')
+      const url = URL.createObjectURL(blob)
+      if (blobUrlRef.current) {
+        try { URL.revokeObjectURL(blobUrlRef.current) } catch {}
+      }
+      blobUrlRef.current = url
+      if (!audioRef.current) {
+        audioRef.current = new Audio()
+      }
+      audioRef.current.onended = () => setIsPlaying(false)
+      audioRef.current.onerror = () => {
+        setIsPlaying(false)
+        setIsFetchingAudio(false)
+      }
+      audioRef.current.src = url
+      audioRef.current.currentTime = 0
+      setIsFetchingAudio(false)
+      setIsPlaying(true)
+      await audioRef.current.play().catch((err: unknown) => {
+        const m = err instanceof Error ? err.message : String(err)
+        throw new Error(m || 'Audio playback failed')
+      })
+    } catch (e: unknown) {
+      setIsFetchingAudio(false)
+      setIsPlaying(false)
+      let msg = 'Unknown error'
+      if (e instanceof Error && e.message) msg = e.message
+      else if (typeof e === 'string' && e) msg = e
+      else if (e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string') {
+        msg = (e as { message: string }).message
+      }
+      console.error('speak failed', msg)
+      alert('Listen failed: ' + msg)
+    }
+  }
+
+  // Derived displayed text
+  const displayed = resp.kind === 'success' ? (resp.data.translated_answer ?? resp.data.answer) : ''
+
+  return (
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex max-w-[1080px] flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <h1 className="flex items-center gap-2 text-[17px] font-semibold tracking-tight text-slate-900">
+              BIS Intelligent Assistant
+              <span className="rounded-full bg-slate-900 px-2.5 py-1 text-[10px] font-bold tracking-widest text-white">SIH26107</span>
+              <span className="hidden text-xs font-normal text-slate-500 sm:inline">— Interactive Dashboard</span>
+            </h1>
+            <p className="mt-1 text-xs text-slate-500">
+              Query Indian Standards, BIS schemes <span className="font-mono text-[11px]">ISI / CRS / FMCS / Hallmarking / MSCS</span>, lab recognition &amp; Standards Clubs — cited.
+            </p>
+          </div>
+          <div className="flex items-center gap-2" role="status" aria-live="polite" aria-label="Backend health">
+            <span className={`h-2 w-2 rounded-full ${health.state === 'ok' ? 'bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,.15)]' : health.state === 'offline' ? 'bg-red-500' : 'bg-amber-400'}`} />
+            <span className={`text-xs font-medium ${health.state === 'ok' ? 'text-emerald-600' : health.state === 'offline' ? 'text-red-600' : 'text-amber-600'}`}>
+              {health.state === 'checking' ? 'checking…' : health.state === 'ok' ? `online · ${health.detail}` : `offline · ${health.detail.slice(0, 60)}`}
+            </span>
+            <button
+              onClick={() => health.check()}
+              className="ml-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              aria-label="Recheck health"
+            >
+              Check /health
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-[760px] px-5 py-6">
+        <div className="flex flex-col gap-5">
+          <section className="card p-5" aria-labelledby="req-h2">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="req-h2" className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+                Request
+              </h2>
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
+                Language
+                <select
+                  value={lang}
+                  onChange={(e) => handleLangChange(e.target.value as TargetLanguage)}
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
+                  aria-label="Select language"
+                >
+                  {LANG_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label} ({o.value})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <label htmlFor="q" className="mt-4 block text-xs font-semibold text-slate-700">
+              Query <span className="font-normal text-slate-500">— {charCount} chars {charCount < 3 ? '(min 3)' : '· ready'}</span>
+            </label>
+            <div className="relative">
+              <textarea
+                id="q"
+                ref={textareaRef}
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value)
+                  if (micError) setMicError(null)
+                }}
+                onKeyDown={onKeyDown}
+                rows={4}
+                placeholder="e.g. I manufacture stainless steel pressure cookers — which BIS standard and scheme applies?"
+                className="mt-1.5 w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-12 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
+                aria-describedby="q-help"
+              />
+              <button
+                type="button"
+                onClick={() => (isRecording ? stopRecording() : startRecording())}
+                disabled={isTranscribing}
+                aria-label={isRecording ? `Stop recording (${recordingSecs}s left)` : isTranscribing ? 'Transcribing' : 'Start voice input'}
+                title={isRecording ? `Recording — ${recordingSecs}s left — click to stop` : isTranscribing ? 'Transcribing…' : 'Click to record voice input'}
+                className={`absolute right-2 top-2 inline-flex h-9 min-w-9 items-center justify-center rounded-full border px-2.5 text-xs font-semibold shadow-sm transition ${
+                  isRecording
+                    ? 'animate-pulse border-red-300 bg-red-500 text-white hover:bg-red-600'
+                    : isTranscribing
+                      ? 'cursor-not-allowed border-slate-200 bg-slate-100 text-slate-500'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                {isRecording ? `⏹ ${recordingSecs}s` : isTranscribing ? '… Transcribing' : '🎤'}
+              </button>
+              {isRecording && (
+                <div className="pointer-events-none absolute bottom-2 left-3 right-14 h-1 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full bg-red-500 transition-all duration-1000 ease-linear"
+                    style={{ width: `${((30 - recordingSecs) / 30) * 100}%` }}
+                    aria-hidden
+                  />
+                </div>
+              )}
+            </div>
+            {micError && (
+              <p role="alert" className="mt-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
+                {micError}
+              </p>
+            )}
+            <p id="q-help" className="mt-1 text-[11px] text-slate-500">
+              Press <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px]">Ctrl</kbd> + <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px]">Enter</kbd> to send. Language change auto re-queries. Mic: click 🎤, speak, click ⏹ — text appears for review before Ask.
+            </p>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => doAsk()}
+                disabled={!canSend || resp.kind === 'loading'}
+                className="rounded-xl bg-sky-500 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {resp.kind === 'loading' ? 'Thinking…' : 'Ask → POST /query'}
+              </button>
+              <button
+                onClick={() => {
+                  setQuery('')
+                  textareaRef.current?.focus()
+                }}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              >
+                Clear
+              </button>
+              {resp.kind === 'success' && <Pill variant="ok">{resp.ms} ms</Pill>}
+              {resp.kind === 'success' && resp.data.target_language && resp.data.target_language !== 'en' && (
+                <Pill variant="ok">lang: {resp.data.target_language}</Pill>
+              )}
+            </div>
+
+            <div className="mt-4">
+              <p className="text-xs font-semibold text-slate-700">Try an example</p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5" role="list">
+                {EXAMPLES.map((ex) => (
+                  <button
+                    key={ex.label}
+                    onClick={() => {
+                      setQuery(ex.query)
+                      textareaRef.current?.focus()
+                    }}
+                    className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-900 hover:text-white"
+                    role="listitem"
+                  >
+                    {ex.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {history.length > 0 && (
+              <div className="mt-4 border-t border-dashed border-slate-200 pt-4">
+                <p className="text-xs font-semibold text-slate-700">Recent</p>
+                <ul className="mt-2 space-y-1" role="list">
+                  {history.map((h, i) => (
+                    <li key={i} className="flex items-center gap-2 border-b border-dashed border-slate-100 py-1.5 text-xs">
+                      <button
+                        onClick={() => {
+                          setQuery(h.q)
+                          doAsk(h.q)
+                          window.scrollTo({ top: 0, behavior: 'smooth' })
+                        }}
+                        className="flex-1 truncate text-left text-sky-600 hover:underline"
+                        title={h.q}
+                      >
+                        {h.q}
+                      </button>
+                      <Pill>{h.type}</Pill>
+                      <span className="text-slate-500">{h.ms}ms</span>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  onClick={() => {
+                    setHistory([])
+                    localStorage.removeItem('bis_hist')
+                  }}
+                  className="mt-2 text-xs text-slate-500 hover:text-slate-700"
+                >
+                  Clear history
+                </button>
+              </div>
+            )}
+          </section>
+
+          <section className="card flex min-h-[420px] flex-col p-5" aria-labelledby="resp-h2" aria-busy={resp.kind === 'loading'}>
+            <h2 id="resp-h2" className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+              Response
+            </h2>
+
+            {resp.kind === 'idle' && (
+              <div className="flex flex-1 flex-col items-center justify-center py-8 text-center">
+                <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8">
+                  <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-white text-slate-400">◐</div>
+                  <h3 className="mt-3 text-sm font-semibold text-slate-900">No query yet</h3>
+                  <p className="mx-auto mt-1 max-w-[28ch] text-xs text-slate-500">Send a query to see the answer, citations, and raw JSON here.</p>
+                </div>
+              </div>
+            )}
+
+            {resp.kind === 'loading' && (
+              <div className="mt-4">
+                <div className="mb-3 flex gap-2">
+                  <span className="h-5 w-24 animate-pulse rounded-full bg-slate-200" />
+                  <span className="h-5 w-20 animate-pulse rounded-full bg-slate-200" />
+                </div>
+                <Skeleton />
+              </div>
+            )}
+
+            {resp.kind === 'error' && (
+              <div role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                <span className="font-semibold">Error:</span> {resp.message}
+              </div>
+            )}
+
+            {resp.kind === 'success' && (
+              <div className="mt-3">
+                <div className="flex flex-wrap gap-2">
+                  <Pill variant="ok">type: <b className="text-slate-900">{resp.data.query_type}</b></Pill>
+                  <Pill variant={resp.data.used_live_fallback ? 'warn' : 'ok'}>fallback: <b className="text-slate-900">{resp.data.used_live_fallback ? 'yes (live)' : 'no (chroma)'}</b></Pill>
+                  <Pill>status: <b className="text-slate-900">{resp.status}</b> · {resp.ms} ms</Pill>
+                  {resp.data.target_language && <Pill>lang: <b className="text-slate-900">{resp.data.target_language}</b></Pill>}
+                </div>
+
+                <div className="prose prose-sm mt-3 max-w-none rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-relaxed text-slate-800">
+                  <div
+                    className="whitespace-pre-wrap"
+                    dangerouslySetInnerHTML={{ __html: fmtAnswer(displayed || '(no answer)') }}
+                  />
+                </div>
+
+                <div className="mt-3">
+                  <h3 className="text-xs font-semibold text-slate-700">Sources — {resp.data.citations.length}</h3>
+                  {resp.data.citations.length === 0 ? (
+                    <p className="mt-1 text-xs text-slate-500">No citations returned — answer may be ungrounded.</p>
+                  ) : (
+                    <ol className="mt-1 list-decimal space-y-1 pl-5 text-xs text-slate-600 marker:text-slate-400">
+                      {resp.data.citations.map((c, i) => (
+                        <li key={i} className="break-all">
+                          <span className="font-medium text-slate-700">{c.source_title || 'Untitled'}</span> —{' '}
+                          <a href={c.source_url} target="_blank" rel="noopener noreferrer" className="text-sky-600 hover:underline">
+                            {c.source_url}
+                          </a>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+
+                <details className="mt-3 overflow-hidden rounded-xl border border-slate-200" open={false}>
+                  <summary className="flex cursor-pointer items-center justify-between bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700">
+                    <span>Raw JSON — {resp.status}</span>
+                    <span className="text-slate-500">click to expand</span>
+                  </summary>
+                  <pre className="m-0 max-h-[280px] overflow-auto bg-slate-900 p-3 text-[11px] leading-relaxed text-slate-100">{JSON.stringify(resp.data, null, 2)}</pre>
+                </details>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {isPlaying ? (
+                    <button
+                      onClick={handleStop}
+                      aria-label="Stop audio"
+                      className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                    >
+                      <span aria-hidden>⏹</span> Stop
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleListen(displayed, lang)}
+                      disabled={isFetchingAudio || !displayed}
+                      aria-label="Listen to answer"
+                      className="inline-flex items-center gap-1.5 rounded-full bg-sky-500 px-4 py-1.5 text-xs font-semibold text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span aria-hidden>🔊</span> {isFetchingAudio ? 'Loading audio…' : 'Listen'}
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => copy(displayed, e.currentTarget)}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Copy answer
+                  </button>
+                  <button
+                    onClick={(e) => copy(JSON.stringify(resp.data, null, 2), e.currentTarget)}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Copy JSON
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+
+        <footer className="mt-6 border-t border-dashed border-slate-200 pt-3 text-[11px] text-slate-500">
+          Endpoints: <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono">GET /health</code> → <code className="font-mono">{"{status:ok}"}</code> &nbsp;{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono">POST /query</code> <code className="font-mono">{"{query,target_language}"}</code> → <code className="font-mono">{"{answer,translated_answer,citations,query_type}"}</code> · Vite dev on <code className="font-mono">:5173</code> proxies to <code className="font-mono">:8000</code>.
+        </footer>
+      </main>
+    </div>
+  )
+}

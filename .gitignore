@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+ingestion/data/raw/
+ingestion/data/chroma/
+.env
+*.sqlite3
+.pytest_cache/
+node_modules/
+bis-assistant.zip

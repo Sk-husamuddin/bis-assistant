@@ -1,0 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #F3F2ED;
+  --color-ink: #1B2A41;
+  --color-slate: #5B6472;
+  --color-brass: #A9822F;
+  --color-verified: #2F6E51;
+  --color-rust: #9C4221;
+  --color-hairline: #D8D5CF;
+  --color-surface: #FFFFFF;
+}
+
+:root {
+  --paper: #F3F2ED;
+  --ink: #1B2A41;
+  --slate: #5B6472;
+  --brass: #A9822F;
+  --verified: #2F6E51;
+  --rust: #9C4221;
+  --hairline: #D8D5CF;
+  --surface: #FFFFFF;
+  --radius: 8px;
+}
+
+* { scrollbar-width: thin; scrollbar-color: #C9C5BC transparent; }
+html { scrollbar-gutter: stable; }
+body {
+  margin: 0;
+  font-family: "Public Sans", ui-sans, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings use Source Serif 4 — gazette character */
+h1, h2, .font-serif {
+  font-family: "Source Serif 4", ui-serif, Georgia, serif;
+}
+
+/* Focus — Brass, visible */
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* Letterhead hairline */
+.letterhead-rule { height: 3px; background: var(--ink); }
+.letterhead-subrule { height: 1px; background: var(--hairline); }
+
+/* Card — flat, hairline, no soft grey shadow; sharp 8px */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+}
+
+/* Stamp badge — double border, slight rotation, not rounded pill */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 6px 10px;
+  border: 2px double currentColor;
+  border-radius: 2px;
+  transform: rotate(-0.4deg);
+}
+.stamp-verified { color: var(--verified); background: #EAF2EC; border-color: var(--verified); }
+.stamp-abstained { color: var(--rust); background: #F9E8E2; border-color: var(--rust); }
+.stamp-fallback { color: var(--slate); background: #F3F2ED; border-color: var(--hairline); border-style: solid; }
+
+/* Schedule — numbered with left brass rule */
+.schedule-item {
+  position: relative;
+  padding-left: 16px;
+  border-left: 3px solid var(--brass);
+  margin-left: 2px;
+}
+.schedule-num {
+  font-family: "Source Serif 4", ui-serif, Georgia, serif;
+  font-weight: 700;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+/* Docket entry — left rule indicates grounded (brass) vs ungrounded (rust) */
+.docket-entry { position: relative; padding-left: 12px; }
+.docket-entry::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 4px; bottom: 4px;
+  width: 3px;
+  background: var(--hairline);
+  border-radius: 1px;
+}
+.docket-entry.grounded::before { background: var(--brass); }
+.docket-entry.abstained::before { background: var(--rust); }
+
+/* Citation reveal — one deliberate motion (grid rows) */
+@media (prefers-reduced-motion: no-preference) {
+  details.schedule-reveal[open] > summary ~ * {
+    animation: scheduleIn 220ms ease;
+  }
+  @keyframes scheduleIn {
+    from { opacity: 0; transform: translateY(-2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* Recording pulse — one deliberate motion */
+@keyframes pulseRing {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+.pulse-ring::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border: 2px solid var(--brass);
+  border-radius: 9999px;
+  animation: pulseRing 1.4s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse-ring::before { display: none; }
+}
