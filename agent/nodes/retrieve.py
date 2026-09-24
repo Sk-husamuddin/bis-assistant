@@ -5,7 +5,6 @@ from typing import List, Dict, Any
 from agent.state import GraphState
 from agent.debug import is_verbose
 
-COLLECTION_NAME = "bis_corpus"
 TOP_K = 5
 TOP_K_COMPARISON = 10
 TOP_K_PER_TOPIC = 4
@@ -84,83 +83,171 @@ def _merge_dedup(docs_list: List[List[Dict[str, Any]]], max_total: int = TOP_K_C
 # numeric threshold — NOT string equality (LBRCE bug fix, see implementation.md:81)
 GROUNDEDNESS_THRESHOLD = 0.35  # cosine distance; chroma returns distance, convert to similarity = 1-distance
 
-_chroma_client = None
-_collection = None
+_pinecone_index = None
 
-def _resolve_persist_dir(raw: str) -> str:
-    if os.path.isabs(raw):
-        return raw
-    # try .env relative to bis-assistant root (two levels up from this file's directory)
-    # this file is at bis-assistant/agent/nodes/retrieve.py
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    candidate = os.path.join(project_root, raw.lstrip("./"))
-    if os.path.exists(candidate) or os.path.exists(os.path.join(candidate, "chroma.sqlite3")) or True:
-        return candidate
-    return os.path.abspath(raw)
-
-def _get_collection():
-    global _chroma_client, _collection
-    if _collection is not None:
-        return _collection
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./ingestion/data/chroma")
-    model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+def _get_pinecone_index():
+    global _pinecone_index
+    if _pinecone_index is not None:
+        return _pinecone_index
     try:
         from dotenv import load_dotenv
         load_dotenv()
-        # re-read after dotenv; keep raw value for resolution
-        persist_dir = os.getenv("CHROMA_PERSIST_DIR", persist_dir)
-        model_name = os.getenv("EMBEDDING_MODEL", model_name)
     except Exception:
         pass
-    persist_dir = _resolve_persist_dir(persist_dir)
-
-    import chromadb
-    from chromadb.utils import embedding_functions
+    api_key = os.getenv("PINECONE_API_KEY", "").strip()
+    index_name = os.getenv("PINECONE_INDEX_NAME", "").strip()
+    if not api_key or not index_name:
+        return None
     try:
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
-    except Exception:
-        ef = embedding_functions.DefaultEmbeddingFunction()
+        from pinecone import Pinecone
+        pc = Pinecone(api_key=api_key)
+        _pinecone_index = pc.Index(index_name)
+        return _pinecone_index
+    except Exception as e:
+        print(f"[retrieve] pinecone init failed: {e}")
+        return None
 
-    # Chroma PersistentClient will create dir if missing
-    _chroma_client = chromadb.PersistentClient(path=persist_dir)
+def _ensure_utf8_stdout():
     try:
-        _collection = _chroma_client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
     except Exception:
-        # create empty if not exists
-        _collection = _chroma_client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=ef, metadata={"hnsw:space": "cosine"})
-    return _collection
+        pass
 
-def _query_chroma(query: str, k: int = TOP_K) -> List[Dict[str, Any]]:
-    col = _get_collection()
-    if col.count() == 0:
+def _safe_str(s: str, max_len: int | None = None) -> str:
+    if s is None:
+        s = ""
+    s = str(s).replace("\r", " ").replace("\n", " ")
+    if max_len is not None:
+        s = s[:max_len]
+    # Always ascii-safe for Windows cp1252 terminal
+    try:
+        return s.encode("ascii", errors="replace").decode("ascii", errors="replace")
+    except Exception:
+        try:
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            return s.encode(enc, errors="replace").decode(enc, errors="replace")
+        except Exception:
+            return s.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+def _log_pinecone_hits(query: str, docs: List[Dict[str, Any]], source: str = "pinecone"):
+    """Pretty-print retrieved chunks for terminal debugging — always visible for pinecone."""
+    _ensure_utf8_stdout()
+    # Always log for pinecone to aid debugging (even when DEBUG_VERBOSE=false)
+    # Use is_verbose() to decide detail level
+    verbose = is_verbose()
+    # Also allow PINECONE_DEBUG=true to force detailed logs
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except Exception:
+        pass
+    pinecone_debug = os.getenv("PINECONE_DEBUG", "").lower() in ("1", "true", "yes", "on")
+    if not verbose and not pinecone_debug:
+        # Still print a concise one-liner for visibility
+        print(f"[pinecone] retrieved {len(docs)} chunk(s) for query={_safe_str(query)!r} via {source} (k={len(docs)})")
+        for i, d in enumerate(docs, 1):
+            sim = d.get("similarity")
+            sim_str = f"{sim:.4f}" if isinstance(sim, (int, float)) else "N/A"
+            print(f"  [{i}] sim={sim_str} | {_safe_str(d.get('source_title',''), 80)} | {_safe_str(d.get('chunk_id',''))}")
+        return
+
+    # Verbose / PINECONE_DEBUG=true: detailed dump
+    print("\n" + "="*78)
+    print(f"[pinecone] RETRIEVED {len(docs)} chunk(s) | query={_safe_str(query)!r} | source={source}")
+    print("="*78)
+    if not docs:
+        print("  (no hits)")
+    for i, d in enumerate(docs, 1):
+        sim = d.get("similarity")
+        dist = d.get("distance")
+        sim_str = f"{sim:.4f}" if isinstance(sim, (int, float)) else "N/A"
+        dist_str = f"{dist:.4f}" if isinstance(dist, (int, float)) else "N/A"
+        title = _safe_str(d.get("source_title") or "", 100)
+        url = _safe_str(d.get("source_url") or "")
+        cid = _safe_str(d.get("chunk_id") or "")
+        content = _safe_str(d.get("content") or "").strip().replace("\r", " ").replace("\n", " ")
+        snippet = content[:350] + ("..." if len(content) > 350 else "")
+        # Truncate snippet to avoid flooding terminal
+        print(f"  [{i}] sim={sim_str} dist={dist_str} | chunk_id={cid}")
+        print(f"      title : {title}")
+        print(f"      url   : {url}")
+        print(f"      snippet: {snippet}")
+        if verbose and d.get("content"):
+            # Show a bit more metadata when verbose
+            extra = []
+            if d.get("source_url"):
+                extra.append(f"url={_safe_str(d.get('source_url'))}")
+            # Show first 600 chars of content when verbose
+            if len(content) > 350:
+                print(f"      full[:600]: {_safe_str(content[:600]).replace(chr(10),' ')}...")
+        print()
+    print("="*78 + "\n")
+
+
+def _query_pinecone(query: str, k: int = TOP_K) -> List[Dict[str, Any]]:
+    """Query Pinecone integrated-inference index with raw text (no local embedding).
+    Returns same shape as former _query_chroma: content, source_url, source_title, chunk_id, distance, similarity.
+    """
+    idx = _get_pinecone_index()
+    if idx is None:
+        print(f"[pinecone] no index available for query={query!r} (check PINECONE_API_KEY/INDEX)")
         return []
-    res = col.query(query_texts=[query], n_results=k, include=["documents", "metadatas", "distances"])
-    docs = []
-    if not res or not res.get("documents"):
+    namespace = os.getenv("PINECONE_NAMESPACE", "default").strip() or "default"
+    try:
+        # Use integrated search — server-side embedding from raw text
+        res = idx.search_records(namespace=namespace, query={"inputs": {"text": query}, "top_k": k})
+    except Exception as e:
+        print(f"[retrieve] pinecone search failed: {e}")
         return []
-    for i in range(len(res["documents"][0])):
-        doc = res["documents"][0][i]
-        meta = res["metadatas"][0][i] or {}
-        dist = res["distances"][0][i] if res.get("distances") else None
-        # chroma cosine distance in [0,2]; similarity = 1 - distance/2? but with hnsw cosine it's [0,2] where 0=identical.
-        # For sentence-transformers cosine, chroma stores 1-cos_sim as distance in some configs. Use 1-distance as similarity approx.
-        similarity = None
-        if dist is not None:
-            # clamp: if distance 0..2, sim 1..-1; but we threshold at 0.35 distance means sim 0.65
-            # spec says "similarity scores are all below threshold (e.g. 0.35)" — interpret as distance > 0.65? 
-            # To avoid confusion, we treat threshold on similarity where similarity = 1 - distance
-            # So distance 0.35 => similarity 0.65 (good). Spec example 0.35 likely means similarity.
-            # We implement: if distance > 0.6 => low similarity. Keep both interpretations logged.
-            similarity = 1 - dist
-        docs.append({
-            "content": doc,
-            "source_url": meta.get("source_url", ""),
-            "source_title": meta.get("source_title", ""),
-            "chunk_id": meta.get("chunk_id", ""),
-            "distance": dist,
-            "similarity": similarity,
-        })
+    docs: List[Dict[str, Any]] = []
+    try:
+        hits = []
+        if hasattr(res, "result") and hasattr(res.result, "hits"):
+            hits = res.result.hits or []
+        elif isinstance(res, dict):
+            hits = res.get("result", {}).get("hits", []) or res.get("hits", [])
+        else:
+            # fallback: try res.hits
+            hits = getattr(res, "hits", []) or []
+        for hit in hits:
+            # hit may be dict or object
+            if isinstance(hit, dict):
+                hit_id = hit.get("id") or hit.get("_id") or ""
+                score = hit.get("score") or hit.get("_score")
+                fields = hit.get("fields") or hit.get("metadata") or {}
+            else:
+                hit_id = getattr(hit, "id", "") or getattr(hit, "_id", "")
+                score = getattr(hit, "score", None)
+                if score is None:
+                    score = getattr(hit, "_score", None)
+                fields = getattr(hit, "fields", None) or getattr(hit, "metadata", None) or {}
+                if fields is None:
+                    fields = {}
+            content = fields.get("chunk_text") or fields.get("text") or ""
+            source_url = fields.get("source_url", "")
+            source_title = fields.get("source_title", "")
+            chunk_id = fields.get("chunk_id", hit_id)
+            similarity = float(score) if isinstance(score, (int, float)) else None
+            distance = (1 - similarity) if similarity is not None else None
+            docs.append({
+                "content": content,
+                "source_url": source_url,
+                "source_title": source_title,
+                "chunk_id": chunk_id,
+                "distance": distance,
+                "similarity": similarity,
+            })
+    except Exception as e:
+        print(f"[retrieve] pinecone parse failed: {e}")
+        return []
+    # --- Terminal logging for debugging ---
+    _log_pinecone_hits(query, docs, source=f"pinecone:k={k} ns={namespace}")
     return docs
+
+# Backward-compat alias (tests previously mocked _query_vector_store)
+def _query_vector_store(query: str, k: int = TOP_K) -> List[Dict[str, Any]]:
+    return _query_pinecone(query, k)
 
 def _live_fallback(query: str) -> List[Dict[str, Any]]:
     # Try Tavily first (if key present), else DuckDuckGo (zero-setup per Q1)
@@ -234,9 +321,49 @@ def _live_fallback(query: str) -> List[Dict[str, Any]]:
         print(f"[retrieve] duckduckgo fallback failed: {e}")
         return []
 
+def _log_final_retrieved(query: str, docs: List[Dict[str, Any]], used_live: bool, topics: List[str] | None = None):
+    """Always-visible summary of final docs sent to synthesis — for terminal debugging."""
+    _ensure_utf8_stdout()
+    verbose = is_verbose()
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except Exception:
+        pass
+    pinecone_debug = os.getenv("PINECONE_DEBUG", "").lower() in ("1", "true", "yes", "on")
+    # Show concise log always; detailed when verbose/pinecone_debug
+    print("\n" + "-"*78)
+    topic_info = f" topics={topics}" if topics else ""
+    print(f"[retrieve] FINAL {len(docs)} doc(s) for query={_safe_str(query)!r}{_safe_str(topic_info)} | used_live_fallback={used_live}")
+    print("-"*78)
+    if not docs:
+        print("  (no docs — will trigger live fallback or abstain)")
+    for i, d in enumerate(docs[:10], 1):  # cap at 10 to avoid flooding
+        sim = d.get("similarity")
+        sim_str = f"{sim:.4f}" if isinstance(sim, (int, float)) else "N/A"
+        title = _safe_str(d.get("source_title") or "", 90)
+        url = _safe_str(d.get("source_url") or "")
+        cid = _safe_str(d.get("chunk_id") or "")
+        content = _safe_str(d.get("content") or "").strip().replace("\r", " ").replace("\n", " ")
+        snippet = content[:280] + ("..." if len(content) > 280 else "")
+        if verbose or pinecone_debug:
+            print(f"  [{i}] sim={sim_str} | chunk_id={cid}")
+            print(f"      title: {title}")
+            print(f"      url  : {url}")
+            print(f"      snippet: {snippet}")
+        else:
+            # concise one-liner
+            print(f"  [{i}] sim={sim_str} | {_safe_str(title[:70])} | {cid}")
+            print(f"      {_safe_str(snippet[:120])}...")
+    if len(docs) > 10:
+        print(f"  ... and {len(docs)-10} more docs")
+    print("-"*78 + "\n")
+
+
 def retrieve_node(state: GraphState) -> dict:
     query = state.get("query", "").strip()
     if not query:
+        print(f"[retrieve] empty query → no docs")
         return {"retrieved_docs": [], "used_live_fallback": False}
 
     # Step 2: query decomposition for compound/comparison queries
@@ -248,8 +375,8 @@ def retrieve_node(state: GraphState) -> dict:
         per_topic_docs: List[List[Dict[str, Any]]] = []
         for t in topics:
             subq = _topic_to_subquery(t, query)
-            # Use per-topic k to keep total bounded
-            docs_t = _query_chroma(subq, k=TOP_K_PER_TOPIC)
+            # Use per-topic k to keep total bounded (pinecone only)
+            docs_t = _query_pinecone(subq, k=TOP_K_PER_TOPIC)
             per_topic_docs.append(docs_t)
         docs = _merge_dedup(per_topic_docs, max_total=TOP_K_COMPARISON)
         # For multi-topic, consider grounded if any topic has at least one decent hit
@@ -284,6 +411,7 @@ def retrieve_node(state: GraphState) -> dict:
                     "source_title": d.get("source_title", ""),
                     "chunk_id": d.get("chunk_id", ""),
                 })
+            _log_final_retrieved(query, docs, used_live=False, topics=topics)
             return {"retrieved_docs": clean_docs, "used_live_fallback": False}
 
     # Single-topic path (original) — also handles comparison with top-k 10 as cheap fix (Step 1)
@@ -293,7 +421,7 @@ def retrieve_node(state: GraphState) -> dict:
     # Cheap fix: if query_type is standard_lookup and looks like comparison, use 10
     if qtype == "standard_lookup" and any(w in query.lower() for w in ["compare", " vs ", " versus ", "difference between", "when does each"]):
         k = TOP_K_COMPARISON
-    docs = _query_chroma(query, k=k)
+    docs = _query_pinecone(query, k=k)
 
     # groundedness check — numeric threshold, not string equality
     # if all similarities below threshold => not grounded
@@ -381,4 +509,5 @@ def retrieve_node(state: GraphState) -> dict:
             "chunk_id": d.get("chunk_id", ""),
         })
 
+    _log_final_retrieved(query, docs, used_live=used_live, topics=None)
     return {"retrieved_docs": clean_docs, "used_live_fallback": used_live}

@@ -17,10 +17,11 @@ def test_consumer_synthetic_retrievable_and_cited():
         "https://www.bis.gov.in/consumer-overview/consumer-overviews/consumer-protection?lang=en",
         "BIS Care app Verify HUID and Branch Office complaint",
     )
-    with patch("agent.nodes.retrieve._query_chroma", return_value=[consumer]):
-        with patch("agent.nodes.retrieve._live_fallback", return_value=[]):
-            out = retrieve_node({"query": "I bought a product with a fake ISI mark, how do I report it?", "query_type": "consumer_query"})
-            assert any("Consumer" in d["source_title"] for d in out["retrieved_docs"])
+    with patch("agent.nodes.retrieve._query_pinecone", return_value=[consumer]):
+        with patch("agent.nodes.retrieve._query_vector_store", return_value=[consumer]):
+            with patch("agent.nodes.retrieve._live_fallback", return_value=[]):
+                out = retrieve_node({"query": "I bought a product with a fake ISI mark, how do I report it?", "query_type": "consumer_query"})
+                assert any("Consumer" in d["source_title"] for d in out["retrieved_docs"])
     # Synthesize should cite it and mention BIS Care + Branch Office
     docs = [
         {"content": "How to verify ... BIS Care app Verify HUID ... Branch Office", "source_title": "BIS Consumer Verification & Complaint Guide", "source_url": "https://www.bis.gov.in/consumer-overview/consumer-overviews/consumer-protection?lang=en", "chunk_id": "c1"}
@@ -36,10 +37,11 @@ def test_hallmark_huid_retrievable_and_cited():
         "https://www.bis.gov.in/hallmarking-overview/hallmarking-overview/",
         "HUID 6-digit purity 14K/585 18K/750 22K/916 AHC free online",
     )
-    with patch("agent.nodes.retrieve._query_chroma", return_value=[hallmark]):
-        with patch("agent.nodes.retrieve._live_fallback", return_value=[]):
-            out = retrieve_node({"query": "What does the HUID number on my jewelry mean?", "query_type": "consumer_query"})
-            assert any("HUID" in d["source_title"] or "Hallmark" in d["source_title"] for d in out["retrieved_docs"])
+    with patch("agent.nodes.retrieve._query_pinecone", return_value=[hallmark]):
+        with patch("agent.nodes.retrieve._query_vector_store", return_value=[hallmark]):
+            with patch("agent.nodes.retrieve._live_fallback", return_value=[]):
+                out = retrieve_node({"query": "What does the HUID number on my jewelry mean?", "query_type": "consumer_query"})
+                assert any("HUID" in d["source_title"] or "Hallmark" in d["source_title"] for d in out["retrieved_docs"])
     docs = [
         {"content": "HUID 6-digit 14K/585 18K/750 22K/916 AHC free online lifetime", "source_title": "BIS Hallmarking — HUID, Purity & AHC Operations", "source_url": "https://www.bis.gov.in/hallmarking-overview/hallmarking-overview/", "chunk_id": "c1"}
     ]

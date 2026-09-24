@@ -15,9 +15,6 @@ try:
 except Exception:
     pass
 
-import chromadb
-from chromadb.utils import embedding_functions
-
 COLLECTION_NAME = "bis_corpus"
 PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(pathlib.Path(__file__).parent / "data" / "chroma"))
 MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
@@ -123,6 +120,90 @@ Silver scope: Where mandatory hallmarking applies to gold, silver articles may b
 ]
 
 def main():
+    # Try Pinecone first if VECTOR_BACKEND=pinecone or PINECONE_API_KEY is set
+    vector_backend = os.getenv("VECTOR_BACKEND", "pinecone").strip().lower()
+    if vector_backend == "pinecone" or os.getenv("PINECONE_API_KEY"):
+        try:
+            from pinecone import Pinecone
+            from ingestion.enrich_metadata import enrich
+            from ingestion.metadata_schema import validate_chunk
+            import datetime, json, hashlib
+            api_key = os.getenv("PINECONE_API_KEY")
+            index_name = os.getenv("PINECONE_INDEX_NAME")
+            if api_key and index_name:
+                pc = Pinecone(api_key=api_key)
+                index = pc.Index(index_name)
+                namespace = os.getenv("PINECONE_NAMESPACE", "default").strip() or "default"
+                # Resolve text field
+                try:
+                    desc = pc.describe_index(index_name)
+                    embed_info = getattr(desc, "embed", None)
+                    field_map = {}
+                    if embed_info is not None:
+                        if isinstance(embed_info, dict):
+                            field_map = embed_info.get("field_map", {})
+                        else:
+                            field_map = getattr(embed_info, "field_map", {}) or {}
+                    text_field = field_map.get("text", "chunk_text") if isinstance(field_map, dict) else "chunk_text"
+                    if not text_field:
+                        text_field = "chunk_text"
+                except Exception:
+                    text_field = "chunk_text"
+                crawl_ts = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                records = []
+                for doc in SYNTHETIC_DOCS:
+                    content = doc["content"]
+                    enriched = enrich(text=content, source_url=doc["url"], source_title=doc["title"], doc_format="html")
+                    payload = {
+                        "source_url": doc["url"],
+                        "source_title": doc["title"],
+                        "doc_category": enriched.get("doc_category"),
+                        "doc_format": "html",
+                        "is_standard_number": enriched.get("is_standard_number"),
+                        "scheme_tag": enriched.get("scheme_tag"),
+                        "publish_date": None,
+                        "gazette_date": None,
+                        "content_hash": enriched.get("content_hash") or hashlib.sha256(content.encode()).hexdigest(),
+                        "crawl_timestamp": crawl_ts,
+                        "page_number": None,
+                        "heading_path": None,
+                        "chunk_index": 0,
+                        "chunk_count": 1,
+                        "supersedes": None,
+                        "superseded_by": None,
+                        "chunk_id": doc["id"],
+                    }
+                    validated = validate_chunk(payload)
+                    if validated is None:
+                        print(f"[seed] quarantine synthetic {doc['id']} validation failed")
+                        continue
+                    vdict = validated.model_dump()
+                    vdict_filtered = {k: v for k, v in vdict.items() if v is not None}
+                    record = {"_id": vdict_filtered["chunk_id"], text_field: content, **vdict_filtered}
+                    if text_field != "text":
+                        record["text"] = content
+                    if text_field != "chunk_text":
+                        record["chunk_text"] = content
+                    record["_id"] = str(record["_id"])
+                    records.append(record)
+                print(f"[seed] upserting {len(records)} synthetic docs to Pinecone index {index_name} namespace {namespace}")
+                # Batch upsert 96
+                for i in range(0, len(records), 96):
+                    batch = records[i:i+96]
+                    resp = index.upsert_records(records=batch, namespace=namespace)
+                    print(f"[seed] pinecone batch {i//96+1} resp={resp}")
+                print(f"[seed] done pinecone synthetic upsert {len(records)}")
+                return
+        except Exception as e:
+            print(f"[seed] pinecone synthetic failed, falling back to chroma: {e}")
+
+    # Fallback Chroma (if pinecone not configured and chromadb available)
+    try:
+        import chromadb
+        from chromadb.utils import embedding_functions
+    except ImportError as e:
+        print(f"[seed] chromadb not available and pinecone failed: {e}", file=sys.stderr)
+        return
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=MODEL)
     client = chromadb.PersistentClient(path=PERSIST_DIR)
     col = client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=ef, metadata={"hnsw:space": "cosine"})
@@ -130,14 +211,12 @@ def main():
     ids = [d["id"] for d in SYNTHETIC_DOCS]
     docs = [d["content"] for d in SYNTHETIC_DOCS]
     metas = [{"source_url": d["url"], "source_title": d["title"], "chunk_id": d["id"]} for d in SYNTHETIC_DOCS]
-    # upsert (delete then add for idempotency)
     try:
         col.delete(ids=ids)
     except Exception:
         pass
     col.add(ids=ids, documents=docs, metadatas=metas)
     print(f"[seed] added {len(ids)} synthetic docs. count after: {col.count()}")
-    # verify retrieval
     res = col.query(query_texts=["What is IS 2347?"], n_results=3, include=["documents","metadatas","distances"])
     print("[seed] verify IS 2347 query distances:", res.get("distances"))
 

@@ -7,8 +7,7 @@ groq==0.13.0
 langgraph==0.2.39
 langchain-groq==0.2.4
 langchain-core==0.3.33
-chromadb==0.5.23
-sentence-transformers==3.3.1
+pinecone==9.1.0
 beautifulsoup4==4.12.3
 pypdf==5.1.0
 tavily-python==0.5.4

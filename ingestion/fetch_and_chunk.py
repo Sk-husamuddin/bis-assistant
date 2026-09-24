@@ -1,23 +1,24 @@
 """
-Fetch, clean, chunk, embed, store in Chroma.
-Usage: python -m ingestion.fetch_and_chunk [--no-fetch] [--persist-dir ingestion/data/chroma]
-Idempotent: clears and re-creates collection on each run.
+Fetch, clean, chunk, embed, store in Pinecone (integrated inference).
+Usage: python -m ingestion.fetch_and_chunk [--no-fetch] [--limit N]
+Upserts to Pinecone with quarantine; VECTOR_BACKEND is now always pinecone.
 """
 import argparse
+import datetime
+import json
 import os
 import re
 import sys
 import hashlib
 import pathlib
+import time
 from typing import List
 
 import httpx
 from bs4 import BeautifulSoup
 
-# Chroma + embeddings — lazy import to allow --help without deps
 CHUNK_SIZE = 800  # tokens approx ~ chars/4
 CHUNK_OVERLAP = 100
-COLLECTION_NAME = "bis_corpus"
 
 RAW_DIR = pathlib.Path(__file__).parent / "data" / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -79,89 +80,241 @@ def chunk_id(url: str, idx: int) -> str:
     h = hashlib.md5(url.encode()).hexdigest()[:8]
     return f"{h}_{idx}"
 
-def build_chroma(persist_dir: str, chunks_with_meta: List[dict], append: bool = False):
-    import chromadb
-    from chromadb.utils import embedding_functions
+def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_path: str = "ingestion/data/quarantine.jsonl"):
+    """
+    Upsert chunks to Pinecone integrated-inference index.
 
-    model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
-    print(f"[chroma] embedding model: {model_name}")
-    print(f"[chroma] persist dir: {persist_dir}")
-    print(f"[chroma] mode: {'APPEND' if append else 'RECREATE'}")
-
-    # Use sentence-transformers embedding function (local)
+    For each chunk: enrich() -> merge -> validate via validate_chunk.
+    Invalid records are appended as JSON to quarantine_path and never sent.
+    Valid records are upserted via upsert_records in batches of 96
+    (integrated-inference limit is lower than raw-vector upsert).
+    """
     try:
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+        from ingestion.enrich_metadata import enrich
+        from ingestion.metadata_schema import validate_chunk
+    except ImportError:
+        # Fallback when run as script with different cwd
+        from enrich_metadata import enrich  # type: ignore
+        from metadata_schema import validate_chunk  # type: ignore
+
+    try:
+        from pinecone import Pinecone
+    except ImportError as e:
+        print(f"[pinecone] SDK not installed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
+
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        print("[pinecone] ERROR: PINECONE_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+    if not index_name:
+        print("[pinecone] ERROR: index_name empty / PINECONE_INDEX_NAME not set", file=sys.stderr)
+        sys.exit(1)
+
+    q_path = pathlib.Path(quarantine_path)
+    q_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pc = Pinecone(api_key=api_key)
+    try:
+        index = pc.Index(index_name)
     except Exception as e:
-        print(f"[chroma] sentence-transformer ef failed ({e}), falling back to default ef", file=sys.stderr)
-        ef = embedding_functions.DefaultEmbeddingFunction()
+        print(f"[pinecone] failed to get index '{index_name}': {e}", file=sys.stderr)
+        sys.exit(1)
 
-    client = chromadb.PersistentClient(path=persist_dir)
-    if append:
-        col = client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=ef, metadata={"hnsw:space": "cosine"})
-        count_before = col.count()
-        print(f"[chroma] append mode — count_before={count_before}")
-        # Deduplicate: only add ids not already present
-        if count_before > 0:
-            existing = set(col.get(include=[])["ids"])
-            filtered = [c for c in chunks_with_meta if c["id"] not in existing]
-            skipped = len(chunks_with_meta) - len(filtered)
-            if skipped:
-                print(f"[chroma] dedup: {skipped} chunks already exist, {len(filtered)} new")
-            chunks_with_meta = filtered
-            if not chunks_with_meta:
-                print(f"[chroma] nothing new to add, count remains {count_before}")
-                return col
-    else:
-        # recreate collection for idempotency
+    # Resolve record text field from index field_map (handles both chunk_text and text)
+    try:
+        desc = pc.describe_index(index_name)
+        embed_info = getattr(desc, "embed", None)
+        if embed_info is None and isinstance(desc, dict):
+            embed_info = desc.get("embed")
+        field_map = {}
+        if embed_info is not None:
+            if isinstance(embed_info, dict):
+                field_map = embed_info.get("field_map", {})
+            else:
+                field_map = getattr(embed_info, "field_map", {}) or {}
+        text_field = field_map.get("text", "chunk_text") if isinstance(field_map, dict) else "chunk_text"
+        if not text_field:
+            text_field = "chunk_text"
+        print(f"[pinecone] index field_map text -> {text_field}")
+    except Exception as e:
+        print(f"[pinecone] warning: could not resolve field_map, defaulting to chunk_text: {e}", file=sys.stderr)
+        text_field = "chunk_text"
+
+    namespace = os.getenv("PINECONE_NAMESPACE", "default")
+    if not namespace or not namespace.strip():
+        namespace = "default"
+
+    valid_records: List[dict] = []
+    quarantined = 0
+    crawl_ts = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    for idx, chunk in enumerate(chunks_with_meta):
+        content = chunk.get("content") or chunk.get("chunk_text") or chunk.get("text") or ""
+        source_url = chunk.get("source_url", "")
+        source_title = chunk.get("source_title", "")
+        chunk_id_val = chunk.get("chunk_id") or chunk.get("id") or chunk.get("_id") or f"unknown_{idx}"
+        chunk_index = chunk.get("chunk_index")
+        if chunk_index is None:
+            try:
+                chunk_index = int(str(chunk_id_val).split("_")[-1])
+            except Exception:
+                chunk_index = idx
+        chunk_count = chunk.get("chunk_count")
+        if chunk_count is None:
+            chunk_count = len(chunks_with_meta)
+        doc_format = chunk.get("doc_format") or chunk.get("kind") or "html"
+        doc_format = str(doc_format).lower().strip()
+        if doc_format not in ("pdf", "html"):
+            doc_format = "html"
+
         try:
-            client.delete_collection(COLLECTION_NAME)
-            print(f"[chroma] deleted existing collection {COLLECTION_NAME}")
-        except Exception:
-            pass
-        col = client.get_or_create_collection(name=COLLECTION_NAME, embedding_function=ef, metadata={"hnsw:space": "cosine"})
+            enriched = enrich(text=content, source_url=source_url, source_title=source_title, doc_format=doc_format)
+        except Exception as e:
+            raw = {
+                "source_url": source_url,
+                "source_title": source_title,
+                "chunk_id": chunk_id_val,
+                "content": content[:500],
+                "error": f"enrich failed: {e}",
+            }
+            with open(q_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(raw, ensure_ascii=False) + "\n")
+            quarantined += 1
+            continue
 
-    ids = [c["id"] for c in chunks_with_meta]
-    docs = [c["content"] for c in chunks_with_meta]
-    metas = [{"source_url": c["source_url"], "source_title": c["source_title"], "chunk_id": c["id"]} for c in chunks_with_meta]
+        payload = {
+            "source_url": enriched.get("source_url", source_url),
+            "source_title": enriched.get("source_title", source_title),
+            "doc_category": enriched.get("doc_category"),
+            "doc_format": enriched.get("doc_format", doc_format),
+            "is_standard_number": enriched.get("is_standard_number"),
+            "scheme_tag": enriched.get("scheme_tag"),
+            "publish_date": chunk.get("publish_date"),
+            "gazette_date": chunk.get("gazette_date"),
+            "content_hash": enriched.get("content_hash") or hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "crawl_timestamp": chunk.get("crawl_timestamp") or crawl_ts,
+            "page_number": chunk.get("page_number"),
+            "heading_path": chunk.get("heading_path"),
+            "chunk_index": int(chunk_index),
+            "chunk_count": int(chunk_count),
+            "supersedes": chunk.get("supersedes"),
+            "superseded_by": chunk.get("superseded_by"),
+            "chunk_id": str(chunk_id_val),
+        }
 
-    # batch add (chromadb limit)
-    B = 100
-    for i in range(0, len(ids), B):
-        col.add(ids=ids[i:i+B], documents=docs[i:i+B], metadatas=metas[i:i+B])
-        print(f"[chroma] added batch {i//B+1} ({min(i+B, len(ids))}/{len(ids)})")
+        validated = validate_chunk(payload)
+        if validated is None:
+            raw = dict(payload)
+            raw["content"] = content[:2000]
+            raw["_quarantine_reason"] = "ChunkMetadata validation failed"
+            try:
+                with open(q_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(raw, ensure_ascii=False) + "\n")
+            except Exception as e:
+                print(f"[pinecone] failed to write quarantine {q_path}: {e}", file=sys.stderr)
+            quarantined += 1
+            continue
 
-    print(f"[chroma] done. count={col.count()}")
-    return col
+        vdict = validated.model_dump()
+        vdict_filtered = {k: v for k, v in vdict.items() if v is not None}
+        record = {
+            "_id": vdict_filtered["chunk_id"],
+            text_field: content,
+            **vdict_filtered,
+        }
+        if text_field != "text":
+            record["text"] = content
+        if text_field != "chunk_text":
+            record["chunk_text"] = content
+        record["_id"] = str(record["_id"])
+        valid_records.append(record)
+
+    print(f"[pinecone] validated {len(valid_records)}/{len(chunks_with_meta)} chunks, quarantined {quarantined}")
+    if quarantined > 0:
+        print(f"[pinecone] quarantine file: {q_path} ({quarantined} records)")
+
+    if not valid_records:
+        print("[pinecone] no valid records to upsert", file=sys.stderr)
+        return None
+
+    BATCH = 96
+    total = len(valid_records)
+    def _upsert_with_retry(batch_records, batch_idx, total_batches):
+        stack = [(batch_records, 0)]
+        while stack:
+            cur_batch, depth = stack.pop()
+            retries = 0
+            max_retries = 3
+            while True:
+                try:
+                    resp = index.upsert_records(records=cur_batch, namespace=namespace)
+                    print(f"[pinecone] upsert batch {batch_idx} ({len(cur_batch)} recs) namespace={namespace} resp={resp}")
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    is_rate_limit = "429" in msg or "RESOURCE_EXHAUSTED" in msg or "RateLimit" in type(e).__name__
+                    if is_rate_limit and len(cur_batch) > 10 and depth < 4:
+                        mid = len(cur_batch) // 2
+                        print(f"[pinecone] rate limited on {len(cur_batch)} recs, splitting batch {batch_idx} (depth {depth})", file=sys.stderr)
+                        stack.append((cur_batch[mid:], depth + 1))
+                        stack.append((cur_batch[:mid], depth + 1))
+                        time.sleep(5)
+                        break
+                    if is_rate_limit and retries < max_retries:
+                        retries += 1
+                        wait = 65
+                        try:
+                            headers = getattr(e, "headers", None) or getattr(getattr(e, "response", None), "headers", None)
+                            if headers and "retry-after" in {k.lower(): v for k, v in headers.items()}:
+                                wait = int(headers.get("Retry-After", wait))
+                        except Exception:
+                            pass
+                        print(f"[pinecone] rate limited (429), waiting {wait}s retry {retries}/{max_retries} batch {batch_idx}: {e}", file=sys.stderr)
+                        time.sleep(wait)
+                        continue
+                    print(f"[pinecone] upsert batch {batch_idx} failed: {e}", file=sys.stderr)
+                    raise
+            if stack:
+                time.sleep(2)
+
+    for i in range(0, total, BATCH):
+        batch = valid_records[i : i + BATCH]
+        batch_idx = i // BATCH + 1
+        _upsert_with_retry(batch, batch_idx, (total + BATCH - 1) // BATCH)
+        if i + BATCH < total:
+            time.sleep(12)
+
+    print(f"[pinecone] done. upserted {total} records to index '{index_name}' namespace '{namespace}'")
+    return index
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-fetch", action="store_true", help="skip HTTP fetch, use cached raw/")
-    parser.add_argument("--persist-dir", default=os.getenv("CHROMA_PERSIST_DIR", str(pathlib.Path(__file__).parent / "data" / "chroma")))
     parser.add_argument("--limit", type=int, default=0, help="limit sources for testing")
     parser.add_argument("--offset", type=int, default=0, help="skip first N sources (for additive dry runs on new corpus tail)")
-    parser.add_argument("--append", action="store_true", help="append to existing collection without deleting (additive mode)")
     args = parser.parse_args()
 
-    # dotenv
     try:
         from dotenv import load_dotenv
         load_dotenv()
-        # re-read persist dir after dotenv if not explicitly passed
-        if args.persist_dir == str(pathlib.Path(__file__).parent / "data" / "chroma"):
-            args.persist_dir = os.getenv("CHROMA_PERSIST_DIR", args.persist_dir)
     except Exception:
         pass
 
     from ingestion.corpus_urls import CORPUS
 
-    # Support --offset + --limit for additive dry runs (new corpus is appended at tail)
     if args.offset or args.limit:
         start = args.offset
         end = (args.offset + args.limit) if args.limit else None
         sources = CORPUS[start:end]
     else:
         sources = CORPUS
-    # Deduplicate exact-URL duplicates before fetch (spec: skip exact URL duplicates)
     seen_urls = set()
     deduped = []
     dups = 0
@@ -204,7 +357,6 @@ def main():
         if data is None:
             continue
 
-        # extract text
         if src.kind == "pdf" or cache_path.suffix == ".pdf" or "pdf" in ctype:
             text = pdf_to_text(data)
         else:
@@ -212,10 +364,8 @@ def main():
 
         if not text or len(text) < 100:
             print(f"[warn] no text extracted for {src.url} (len={len(text) if text else 0})", file=sys.stderr)
-            # store raw snippet so retrieval still has something to ground on
             text = f"Source: {src.title} ({src.url}) — content could not be extracted. Title: {src.title}"
 
-        # prepend title for better retrieval
         text = f"Source: {src.title}\nURL: {src.url}\n\n{text}"
 
         chunks = chunk_text(text)
@@ -226,14 +376,22 @@ def main():
                 "content": ch,
                 "source_url": src.url,
                 "source_title": src.title,
+                "doc_format": src.kind,
+                "chunk_index": idx,
+                "chunk_count": len(chunks),
             })
 
     print(f"[total] {len(all_chunks)} chunks from {len(sources)} sources")
     if not all_chunks:
-        print("[error] no chunks — aborting chroma build", file=sys.stderr)
+        print("[error] no chunks — aborting build", file=sys.stderr)
         sys.exit(1)
 
-    build_chroma(args.persist_dir, all_chunks, append=args.append)
+    index_name = os.getenv("PINECONE_INDEX_NAME", "").strip()
+    if not index_name:
+        print("[error] PINECONE_INDEX_NAME not set", file=sys.stderr)
+        sys.exit(1)
+    quarantine_path = os.getenv("QUARANTINE_PATH", "ingestion/data/quarantine.jsonl")
+    build_pinecone(index_name, all_chunks, quarantine_path=quarantine_path)
     print("[done] ingestion complete")
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from agent.nodes.retrieve import _query_chroma, retrieve_node, GROUNDEDNESS_THRESHOLD
+from agent.nodes.retrieve import _query_pinecone, retrieve_node, GROUNDEDNESS_THRESHOLD
 from agent.graph import run_query
 
 pytestmark = pytest.mark.integration
@@ -129,8 +129,8 @@ def test_adversarial_abstention(label, query):
     except Exception:
         pass
 
-    # 1. Raw chroma similarities
-    docs_raw = _query_chroma(query, k=5)
+    # 1. Raw pinecone similarities
+    docs_raw = _query_pinecone(query, k=5)
     sims = [d["similarity"] for d in docs_raw if d.get("similarity") is not None]
     max_sim = max(sims) if sims else 0.0
     below = all(s < GROUNDEDNESS_THRESHOLD for s in sims) if sims else True
