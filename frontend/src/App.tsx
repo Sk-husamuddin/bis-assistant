@@ -79,7 +79,7 @@ export default function App() {
   const [lang, setLang] = useState<TargetLanguage>('en')
   const [voiceLang, setVoiceLang] = useState<TargetLanguage>('en')
   const [resp, setResp] = useState<ResponseState>({ kind: 'idle' })
-  const [history, setHistory] = useState<{ q: string; type: string; ms: number; at: string }[]>(() => {
+  const [history, setHistory] = useState<{ q: string; type: string; ms: number; at: string; provenance: 'verified' | 'fallback' }[]>(() => {
     try {
       return JSON.parse(localStorage.getItem('bis_hist') || '[]')
     } catch {
@@ -100,9 +100,9 @@ export default function App() {
   const canSend = useMemo(() => query.trim().length >= 3, [query])
   const charCount = query.length
 
-  const pushHistory = useCallback((q: string, type: string, ms: number) => {
+  const pushHistory = useCallback((q: string, type: string, ms: number, provenance: 'verified' | 'fallback') => {
     setHistory((h) => {
-      const next = [{ q, type, ms, at: new Date().toLocaleTimeString() }, ...h].slice(0, 6)
+      const next = [{ q, type, ms, at: new Date().toLocaleTimeString(), provenance }, ...h].slice(0, 6)
       localStorage.setItem('bis_hist', JSON.stringify(next))
       return next
     })
@@ -236,7 +236,7 @@ export default function App() {
       try {
         const { data, status, ms } = await postQuery(q, targetLang, ac.signal)
         setResp({ kind: 'success', data, status, ms, query: q })
-        pushHistory(q, data.query_type, ms)
+        pushHistory(q, data.query_type, ms, data.used_live_fallback ? 'fallback' : 'verified')
       } catch (e) {
         if ((e as DOMException)?.name === 'AbortError') return
         const msg = e instanceof Error ? e.message : String(e)
@@ -401,12 +401,12 @@ export default function App() {
             <h1 className="font-serif text-[20px] font-bold leading-none tracking-tight text-[var(--ink)]">
               Intelligent Assistant <span className="align-baseline text-[11px] font-semibold tracking-[0.08em] text-[var(--slate)]">SIH26107</span>
             </h1>
-            <div className="mt-1 text-[12px] text-[var(--slate)]">Standards, schemes and hallmarking · grounded answers</div>
+            <div className="mt-1 text-[12px] text-[var(--slate)]">Standards, schemes and hallmarking, with grounded answers</div>
           </div>
           <div className="flex items-center gap-3 text-xs" role="status" aria-live="polite" aria-label="Backend health">
             <span className={`h-2 w-2 rounded-full ${health.state === 'ok' ? 'bg-[var(--verified)]' : health.state === 'offline' ? 'bg-[var(--rust)]' : 'bg-[var(--brass)]'}`} aria-hidden />
             <span className={`font-medium ${health.state === 'ok' ? 'text-[var(--verified)]' : health.state === 'offline' ? 'text-[var(--rust)]' : 'text-[var(--slate)]'}`}>
-              {health.state === 'checking' ? 'Checking…' : health.state === 'ok' ? `Online · ${health.detail}` : `Offline · ${health.detail.slice(0,60)}`}
+              {health.state === 'checking' ? 'Checking…' : health.state === 'ok' ? 'Online' : 'Offline'}
             </span>
             <button onClick={() => health.check()} className="rounded border border-[var(--hairline)] bg-white px-2.5 py-1 text-xs font-medium text-[var(--slate)] hover:bg-[var(--paper)]" aria-label="Recheck health">Check</button>
           </div>
@@ -416,10 +416,10 @@ export default function App() {
 
       <div className="mx-auto flex max-w-[1040px] flex-col gap-6 px-4 py-5 sm:px-6 md:py-8">
         {/* Left rail — Docket */}
-        <aside className="order-2 md:order-2 border-t border-[var(--hairline)] bg-white md:rounded-lg md:border">
+        <aside className="order-2 border-t border-[var(--hairline)] pt-6">
           <div className="border-b border-[var(--hairline)] px-4 py-3">
-            <h2 className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Docket</h2>
-            <p className="mt-1 text-[11px] leading-relaxed text-[var(--slate)]">Running log of submitted queries. Select an entry to repopulate the submission form.</p>
+            <h2 className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Answer log</h2>
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--slate)]">Chronological record of submitted queries. Select an entry to repopulate the submission form.</p>
           </div>
           <div className="max-h-[340px] overflow-auto md:max-h-[62vh]">
             {EXAMPLES.length > 0 && (
@@ -448,8 +448,9 @@ export default function App() {
                     <li key={idx} className={`docket-entry ${h.type === 'standard_lookup' ? 'grounded' : 'grounded'} py-3 pr-4 pl-4`}>
                       <button onClick={() => { setQuery(h.q); doAsk(h.q); window.scrollTo({top:0, behavior:'smooth'}) }} className="w-full text-left focus:outline-none">
                         <div className="flex items-baseline justify-between gap-2">
-                          <span className="font-serif text-[11px] font-semibold text-[var(--ink)]">#{num}</span>
-                          <span className="text-[11px] text-[var(--slate)]">{h.at} · {h.ms}ms</span>
+                          <span className="font-serif text-[11px] font-semibold text-[var(--ink)]">Entry {history.length - idx}</span>
+                          <span className={`stamp ${h.provenance === 'verified' ? 'stamp-verified' : 'stamp-fallback'}`}>{h.provenance === 'verified' ? 'VERIFIED' : 'LIVE FALLBACK'}</span>
+                          <span className="text-[11px] text-[var(--slate)]">{h.at} <span aria-hidden>({h.ms}ms)</span></span>
                         </div>
                         <div className="mt-1 line-clamp-2 text-[13px] leading-relaxed text-[var(--ink)]">{h.q}</div>
                         <div className="mt-1 text-[11px] text-[var(--slate)]">{h.type}</div>
@@ -468,14 +469,14 @@ export default function App() {
         </aside>
 
         {/* Main — Registry entry */}
-        <main className="order-1 md:order-1 min-w-0">
+        <main className="order-1 min-w-0">
           {/* Submission group — single control area */}
-          <section className="card overflow-hidden" aria-labelledby="submission-heading">
+          <section aria-labelledby="submission-heading">
             <div className="border-b border-[var(--hairline)] bg-[var(--paper)]/60 px-5 py-3">
               <h2 id="submission-heading" className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Submission</h2>
               <p className="mt-1 text-[11px] text-[var(--slate)]">Enter a query in plain language. Select language, optionally use voice, then submit.</p>
             </div>
-            <div className="p-5">
+            <div className="pt-5">
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 text-xs font-medium text-[var(--ink)]">
                   Answer
@@ -489,7 +490,7 @@ export default function App() {
                     {LANG_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label} ({o.value})</option>)}
                   </select>
                 </label>
-                <span className="text-[11px] text-[var(--slate)]">{charCount} chars {charCount < 3 ? '(minimum 3)' : '· ready'}</span>
+                <span className="text-[11px] text-[var(--slate)]">{charCount} chars {charCount < 3 ? '(minimum 3)' : 'ready'}</span>
                 <span className="ml-auto hidden text-[11px] text-[var(--slate)] md:inline">Ctrl+Enter to submit</span>
               </div>
 
@@ -514,7 +515,7 @@ export default function App() {
                   className={`absolute right-2 top-2 inline-flex h-9 min-w-9 items-center justify-center rounded-full border px-2.5 text-xs font-semibold shadow-sm ${isRecording ? 'border-[var(--rust)] bg-[var(--rust)] text-white' : isTranscribing ? 'cursor-not-allowed border-[var(--hairline)] bg-[var(--paper)] text-[var(--slate)]' : 'border-[var(--hairline)] bg-white text-[var(--ink)] hover:bg-[var(--paper)]'} ${isRecording ? 'pulse-ring' : ''}`}
                   style={isRecording ? { position: 'absolute' } : undefined}
                 >
-                  {isRecording ? `Stop · ${recordingSecs}s` : isTranscribing ? `Transcribing ${voiceLang}…` : 'Record'}
+                  {isRecording ? `Stop ${recordingSecs}s` : isTranscribing ? `Transcribing ${voiceLang}…` : 'Record'}
                 </button>
                 {isRecording && (
                   <div className="pointer-events-none absolute bottom-2 left-3 right-14 h-1 overflow-hidden rounded-full bg-[var(--hairline)]/50">
@@ -537,11 +538,11 @@ export default function App() {
             </div>
           </section>
 
-          {/* Registry Entry */}
-          <section className="card mt-5 overflow-hidden p-0" aria-labelledby="registry-heading" aria-busy={resp.kind === 'loading'}>
-            <div className="border-b border-[var(--hairline)] bg-[var(--paper)]/60 px-5 py-3">
+          {/* Current answer */}
+          <section className="mt-8 border-t border-[var(--hairline)] pt-6" aria-labelledby="registry-heading" aria-busy={resp.kind === 'loading'}>
+            <div className="border-b border-[var(--hairline)] pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 id="registry-heading" className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Registry Entry</h2>
+                <h2 id="registry-heading" className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Current answer</h2>
                 {resp.kind === 'success' && (
                   <span className={`stamp ${isAbstained ? 'stamp-abstained' : isGrounded ? 'stamp-verified' : 'stamp-fallback'}`}>
                     {isAbstained ? 'ABSTAINED' : isGrounded ? 'VERIFIED' : 'UNVERIFIED'}
@@ -554,17 +555,15 @@ export default function App() {
               {resp.kind === 'success' && (
                 <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[var(--slate)]">
                   <span>type <b className="font-medium text-[var(--ink)]">{resp.data.query_type}</b></span>
-                  <span>·</span>
+                  <span className="sr-only">Source:</span>
                   <span>source <b className="font-medium text-[var(--ink)]">{resp.data.used_live_fallback ? 'live' : 'registry'}</b></span>
-                  <span>·</span>
                   <span>{resp.ms} ms</span>
-                  <span>·</span>
                   <span>lang <b className="font-medium text-[var(--ink)]">{resp.data.target_language ?? lang}</b></span>
                 </div>
               )}
             </div>
 
-            <div className="px-5 py-5">
+            <div className="pt-5">
               {resp.kind === 'idle' && (
                 <div className="py-10 text-center">
                   <div className="mx-auto h-px w-16 bg-[var(--hairline)]" />
