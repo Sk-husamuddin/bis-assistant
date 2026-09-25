@@ -13,12 +13,17 @@ import hashlib
 import re
 
 # Reuse existing patterns / detection — do not duplicate
-from agent.nodes.retrieve import _IS_NUMBER_RE, _TOPIC_PATTERNS, _detect_topics
+from agent.nodes.retrieve import _IS_NUMBER_RE as _BASE_IS_RE, _TOPIC_PATTERNS, _detect_topics
+import re as _re
+# Extend IS regex to handle URL-encoded plus and spaces (e.g. IS+1786)
+_IS_NUMBER_RE = _re.compile(r"IS\s*[\+\s]*\d{3,6}(?:\s*[-–]\s*\d{4})?", _re.I)
 
 
 def _normalize_is_number(raw: str) -> str:
-    """Normalize IS number like 'IS  2347' -> 'IS 2347' (upper, single space)."""
-    return re.sub(r"\s+", " ", raw.strip().upper())
+    """Normalize IS number like 'IS  2347' or 'IS+1786' -> 'IS 2347' (upper, single space)."""
+    # Replace plus with space, then collapse whitespace
+    cleaned = raw.replace("+", " ")
+    return re.sub(r"\s+", " ", cleaned.strip().upper())
 
 
 def _detect_doc_category(
@@ -53,7 +58,7 @@ def _detect_doc_category(
     for pat in _TOPIC_PATTERNS.values():
         if pat.search(combined):
             return "Scheme Guideline"
-    return "Unclassified"
+    return "Unknown"
 
 
 def enrich(text: str, source_url: str, source_title: str, doc_format: str) -> dict:

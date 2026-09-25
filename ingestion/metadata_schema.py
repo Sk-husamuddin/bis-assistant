@@ -23,7 +23,8 @@ class ChunkMetadata(BaseModel):
         "Gazette Notification",
         "IS Standard",
         "Circular",
-        "Unclassified",
+        "Unknown",
+        "Unclassified",  # kept for backwards compat (maps to Unknown)
     ]
     doc_format: Literal["pdf", "html"]
     is_standard_number: Optional[str] = None
@@ -39,6 +40,7 @@ class ChunkMetadata(BaseModel):
     supersedes: Optional[str] = None
     superseded_by: Optional[str] = None
     chunk_id: str
+    ingest_source: Literal["curated", "crawler"]
 
 
 def validate_chunk(data: dict) -> Optional[ChunkMetadata]:

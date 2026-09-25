@@ -1,0 +1,26 @@
+﻿[crawler] starting with 3 seeds, depth=0, max_pages=5, budget=50000
+[crawler] seed: https://www.bis.gov.in/wp-content/uploads/2021/03/Annual_Report_2019-20_new.pdf
+[crawler] seed: https://www.bis.gov.in/wp-content/uploads/2022/02/Annual_report_for_final_approval_on_12-1-2022.pdf
+[crawler] seed: https://www.bis.gov.in/wp-content/uploads/2020/03/BISAnnualReport2019.pdf
+python : [crawler] fetch failed https://www.bis.gov.in/wp-content/uploads/2021/03/Annual_Report_2019-20_new.pdf: peer 
+closed connection without sending complete message body (received 2465300 bytes, expected 7963245)
+At line:1 char:1
++ python -m ingestion.crawler --seed "https://www.bis.gov.in/wp-content ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([crawler] fetch...pected 7963245):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[crawler] still would exceed after flush ÔÇö stopping
+[crawler] doc https://www.bis.gov.in/wp-content/uploads/2022/02/Annual_report_for_final_approval_on_12-1-2022.pdf | 84 chunks | tokens 0/50000
+[crawler] upsert batch 74 | tokens batch 49370 total 49370/50000 remaining 630
+[crawler] stopping: token budget exceeded
+
+==============================================================================
+[crawler] SUMMARY | crawled 1 docs (discovered 3 urls, visited 2)
+[crawler] chunks: total 84 validated 74 quarantined 1 skipped_idempotent 0
+[crawler] tokens: consumed 49370/50000 remaining 630 (monthly 5M, used ~1.5M prior, this run budget 50000)
+[crawler] quarantine file: C:\sih2026\bis-assistant\ingestion\data\quarantine\quarantine_20260925_004312.jsonl (1 records)
+[crawler] Pinecone index: bis-assistant namespace default ingest_source=crawler
+==============================================================================
+
+[crawler] monthly Pinecone budget: 5M total, ~1.5M used prior, this run 49370, remaining ~3450630

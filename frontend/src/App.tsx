@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getHealth, postQuery, postSpeak, postTranscribe } from './api/client'
+import { checkHealth, askQuery, speak, transcribe, getAudioCacheUrl, checkAudioCacheHead } from './lib/api'
 import type { QueryResponse, TargetLanguage } from './api/types'
 
 type HealthState = 'checking' | 'ok' | 'offline'
@@ -36,7 +36,7 @@ function useHealth() {
   const check = useCallback(async (signal?: AbortSignal) => {
     setState('checking')
     try {
-      const j = await getHealth(signal)
+      const j = await checkHealth(signal)
       setState('ok')
       setDetail(j.status || 'ok')
     } catch (e) {
@@ -166,7 +166,7 @@ export default function App() {
         setIsTranscribing(true)
         setMicError(null)
         try {
-          const { text } = await postTranscribe(blob, voiceLang)
+          const { text } = await transcribe(blob, voiceLang)
           if (!text || text.trim().length === 0) {
             setMicError('No speech detected — try again, speak clearly.')
           } else {
@@ -234,7 +234,7 @@ export default function App() {
       abortRef.current = ac
       setResp({ kind: 'loading' })
       try {
-        const { data, status, ms } = await postQuery(q, targetLang, ac.signal)
+        const { data, status, ms } = await askQuery(q, targetLang, ac.signal)
         setResp({ kind: 'success', data, status, ms, query: q })
         pushHistory(q, data.query_type, ms)
       } catch (e) {
@@ -320,10 +320,10 @@ export default function App() {
     const currentQuery = resp.kind === 'success' ? resp.query : query
     const demoId = getDemoId(currentQuery)
     if (demoId) {
-      const cacheUrl = `/audio_cache/${demoId}_${language}.mp3`
+      const cacheUrl = getAudioCacheUrl(demoId, language)
       try {
-        const head = await fetch(cacheUrl, { method: 'HEAD' })
-        if (head.ok) {
+        const ok = await checkAudioCacheHead(demoId, language)
+        if (ok) {
           if (blobUrlRef.current) {
             try { URL.revokeObjectURL(blobUrlRef.current) } catch {}
             blobUrlRef.current = null
@@ -349,7 +349,7 @@ export default function App() {
     }
     setIsFetchingAudio(true)
     try {
-      const blob = await postSpeak(text, language)
+      const blob = await speak(text, language)
       if (!blob || blob.size === 0) throw new Error('Empty audio response')
       const url = URL.createObjectURL(blob)
       if (blobUrlRef.current) {
@@ -620,7 +620,7 @@ export default function App() {
           </section>
 
           <div className="mt-4 text-center text-[11px] text-[var(--slate)]">
-            Registry served from <span className="font-mono text-[11px]">/health</span> and <span className="font-mono text-[11px]">/query</span> — Vite dev proxies to <span className="font-mono text-[11px]">:8000</span>.
+            Registry served from health and query — Vite dev proxies to backend.
           </div>
         </main>
       </div>

@@ -80,7 +80,7 @@ def chunk_id(url: str, idx: int) -> str:
     h = hashlib.md5(url.encode()).hexdigest()[:8]
     return f"{h}_{idx}"
 
-def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_path: str = "ingestion/data/quarantine.jsonl"):
+def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_path: str = "ingestion/data/quarantine/quarantine.jsonl"):
     """
     Upsert chunks to Pinecone integrated-inference index.
 
@@ -117,7 +117,15 @@ def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_pat
         print("[pinecone] ERROR: index_name empty / PINECONE_INDEX_NAME not set", file=sys.stderr)
         sys.exit(1)
 
+    # Quarantine: ensure file is under ingestion/data/quarantine/ directory
     q_path = pathlib.Path(quarantine_path)
+    # If legacy file path ingestion/data/quarantine.jsonl, migrate to dir
+    if q_path.name == "quarantine.jsonl" and q_path.parent.name != "quarantine":
+        # e.g. ingestion/data/quarantine.jsonl -> ingestion/data/quarantine/quarantine.jsonl
+        q_path = q_path.parent / "quarantine" / q_path.name
+    if not q_path.is_absolute():
+        # Try to resolve relative to project root
+        pass
     q_path.parent.mkdir(parents=True, exist_ok=True)
 
     pc = Pinecone(api_key=api_key)
@@ -189,6 +197,8 @@ def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_pat
             quarantined += 1
             continue
 
+        # ingest_source tag: curated for this pipeline (crawler tags as "crawler")
+        ingest_source = chunk.get("ingest_source") or "curated"
         payload = {
             "source_url": enriched.get("source_url", source_url),
             "source_title": enriched.get("source_title", source_title),
@@ -207,6 +217,7 @@ def build_pinecone(index_name: str, chunks_with_meta: List[dict], quarantine_pat
             "supersedes": chunk.get("supersedes"),
             "superseded_by": chunk.get("superseded_by"),
             "chunk_id": str(chunk_id_val),
+            "ingest_source": ingest_source,
         }
 
         validated = validate_chunk(payload)
@@ -379,6 +390,7 @@ def main():
                 "doc_format": src.kind,
                 "chunk_index": idx,
                 "chunk_count": len(chunks),
+                "ingest_source": "curated",
             })
 
     print(f"[total] {len(all_chunks)} chunks from {len(sources)} sources")
@@ -390,7 +402,7 @@ def main():
     if not index_name:
         print("[error] PINECONE_INDEX_NAME not set", file=sys.stderr)
         sys.exit(1)
-    quarantine_path = os.getenv("QUARANTINE_PATH", "ingestion/data/quarantine.jsonl")
+    quarantine_path = os.getenv("QUARANTINE_PATH", "ingestion/data/quarantine/quarantine.jsonl")
     build_pinecone(index_name, all_chunks, quarantine_path=quarantine_path)
     print("[done] ingestion complete")
 

@@ -27,6 +27,7 @@ def _valid_payload():
         "supersedes": None,
         "superseded_by": None,
         "chunk_id": "is2347_0",
+        "ingest_source": "curated",
     }
 
 
