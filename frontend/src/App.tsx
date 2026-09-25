@@ -397,11 +397,11 @@ export default function App() {
         <div className="letterhead-rule" />
         <div className="mx-auto flex max-w-[1240px] flex-wrap items-center justify-between gap-4 px-5 py-5 md:px-8">
           <div>
-            <div className="text-[11px] font-semibold tracking-[0.14em] text-[var(--slate)]">BUREAU OF INDIAN STANDARDS</div>
+            <div className="text-[11px] font-semibold text-[var(--slate)]">Bureau of Indian Standards</div>
             <h1 className="font-serif text-[20px] font-bold leading-none tracking-tight text-[var(--ink)]">
               Intelligent Assistant <span className="align-baseline text-[11px] font-semibold tracking-[0.08em] text-[var(--slate)]">SIH26107</span>
             </h1>
-            <div className="mt-1 font-serif text-[12px] italic text-[var(--slate)]">Registry of Standards, Schemes &amp; Hallmarking — Official Record</div>
+            <div className="mt-1 text-[12px] text-[var(--slate)]">Standards, schemes and hallmarking · grounded answers</div>
           </div>
           <div className="flex items-center gap-3 text-xs" role="status" aria-live="polite" aria-label="Backend health">
             <span className={`h-2 w-2 rounded-full ${health.state === 'ok' ? 'bg-[var(--verified)]' : health.state === 'offline' ? 'bg-[var(--rust)]' : 'bg-[var(--brass)]'}`} aria-hidden />
@@ -414,9 +414,9 @@ export default function App() {
         <div className="letterhead-subrule" />
       </header>
 
-      <div className="mx-auto grid max-w-[1240px] grid-cols-1 gap-0 px-0 md:grid-cols-[300px_1fr] md:px-5 md:py-6 md:gap-6">
+      <div className="mx-auto flex max-w-[1040px] flex-col gap-6 px-4 py-5 sm:px-6 md:py-8">
         {/* Left rail — Docket */}
-        <aside className="order-2 md:order-1 border-t border-[var(--hairline)] bg-white md:rounded-lg md:border">
+        <aside className="order-2 md:order-2 border-t border-[var(--hairline)] bg-white md:rounded-lg md:border">
           <div className="border-b border-[var(--hairline)] px-4 py-3">
             <h2 className="font-serif text-[13px] font-semibold tracking-tight text-[var(--ink)]">Docket</h2>
             <p className="mt-1 text-[11px] leading-relaxed text-[var(--slate)]">Running log of submitted queries. Select an entry to repopulate the submission form.</p>
@@ -424,7 +424,7 @@ export default function App() {
           <div className="max-h-[340px] overflow-auto md:max-h-[62vh]">
             {EXAMPLES.length > 0 && (
               <div className="border-b border-dashed border-[var(--hairline)] bg-[var(--paper)]/50 px-4 py-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--slate)]">Examples</div>
+                <div className="text-[11px] font-semibold text-[var(--slate)]">Reference queries</div>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {EXAMPLES.map(ex => (
                     <button key={ex.label} onClick={() => { setQuery(ex.query); textareaRef.current?.focus(); }} className="rounded border border-[var(--hairline)] bg-white px-2.5 py-1 text-xs font-medium text-[var(--slate)] hover:border-[var(--ink)] hover:text-[var(--ink)]">
@@ -468,7 +468,7 @@ export default function App() {
         </aside>
 
         {/* Main — Registry entry */}
-        <main className="order-1 md:order-2 min-w-0">
+        <main className="order-1 md:order-1 min-w-0">
           {/* Submission group — single control area */}
           <section className="card overflow-hidden" aria-labelledby="submission-heading">
             <div className="border-b border-[var(--hairline)] bg-[var(--paper)]/60 px-5 py-3">
@@ -514,7 +514,7 @@ export default function App() {
                   className={`absolute right-2 top-2 inline-flex h-9 min-w-9 items-center justify-center rounded-full border px-2.5 text-xs font-semibold shadow-sm ${isRecording ? 'border-[var(--rust)] bg-[var(--rust)] text-white' : isTranscribing ? 'cursor-not-allowed border-[var(--hairline)] bg-[var(--paper)] text-[var(--slate)]' : 'border-[var(--hairline)] bg-white text-[var(--ink)] hover:bg-[var(--paper)]'} ${isRecording ? 'pulse-ring' : ''}`}
                   style={isRecording ? { position: 'absolute' } : undefined}
                 >
-                  {isRecording ? `⏹ ${recordingSecs}s` : isTranscribing ? `Transcribing ${voiceLang}…` : '🎤'}
+                  {isRecording ? `Stop · ${recordingSecs}s` : isTranscribing ? `Transcribing ${voiceLang}…` : 'Record'}
                 </button>
                 {isRecording && (
                   <div className="pointer-events-none absolute bottom-2 left-3 right-14 h-1 overflow-hidden rounded-full bg-[var(--hairline)]/50">
@@ -527,7 +527,7 @@ export default function App() {
 
               <div className="mt-4 flex flex-wrap items-center gap-2">
                 <button onClick={() => doAsk()} disabled={!canSend || resp.kind === 'loading'} className="rounded bg-[var(--ink)] px-4 py-2 text-sm font-semibold text-white hover:bg-black disabled:opacity-50">
-                  Submit
+                  Get answer
                 </button>
                 <button onClick={() => { setQuery(''); textareaRef.current?.focus() }} className="rounded border border-[var(--hairline)] bg-white px-3 py-2 text-sm font-medium text-[var(--ink)] hover:bg-[var(--paper)]">
                   Clear
