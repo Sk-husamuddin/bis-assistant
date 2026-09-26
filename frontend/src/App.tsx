@@ -2,7 +2,31 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { checkHealth, askQuery, speak, transcribe, getAudioCacheUrl, checkAudioCacheHead } from './lib/api'
 import type { QueryResponse, TargetLanguage } from './api/types'
 
-type HealthState = 'checking' | 'ok' | 'offline'
+type HealthState = 'checking' | 'waking' | 'ok' | 'offline'
+
+// Render free-tier backends sleep when idle and need ~60–90s to cold-start.
+// Retry the health probe instead of flashing "Offline" on the first failure.
+const HEALTH_MAX_ATTEMPTS = 10
+const HEALTH_RETRY_DELAY_MS = 10000
+const HEALTH_ATTEMPT_TIMEOUT_MS = 25000
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(t)
+      resolve()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
 type ResponseState =
   | { kind: 'idle' }
   | { kind: 'loading' }
@@ -32,22 +56,63 @@ function getDemoId(query: string): string | null {
 
 function useHealth() {
   const [state, setState] = useState<HealthState>('checking')
-  const [detail, setDetail] = useState<string>('')
+  const [detail, setDetail] = useState<string>('Contacting backend…')
+  const inFlightRef = useRef(false)
   const check = useCallback(async (signal?: AbortSignal) => {
-    setState('checking')
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     try {
-      const j = await checkHealth(signal)
-      setState('ok')
-      setDetail(j.status || 'ok')
-    } catch (e) {
-      setState('offline')
-      setDetail(e instanceof Error ? e.message : 'error')
+      for (let attempt = 1; attempt <= HEALTH_MAX_ATTEMPTS; attempt++) {
+        if (signal?.aborted) return
+        if (attempt === 1) {
+          setState('checking')
+          setDetail('Contacting backend…')
+        } else {
+          setState('waking')
+          setDetail(`attempt ${attempt}/${HEALTH_MAX_ATTEMPTS} · ~${(attempt - 1) * (HEALTH_RETRY_DELAY_MS / 1000)}s elapsed`)
+        }
+        const ctrl = new AbortController()
+        const onOuterAbort = () => ctrl.abort()
+        signal?.addEventListener('abort', onOuterAbort, { once: true })
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          ctrl.abort()
+        }, HEALTH_ATTEMPT_TIMEOUT_MS)
+        try {
+          const j = await checkHealth(ctrl.signal)
+          if (signal?.aborted) return
+          setState('ok')
+          setDetail(j.status || 'ok')
+          return
+        } catch (e) {
+          if (signal?.aborted) return
+          const raw = e instanceof Error ? e.message : String(e)
+          const isAbort = (e as DOMException)?.name === 'AbortError'
+          const msg = timedOut ? 'probe timed out after 25s' : raw || 'error'
+          if (attempt >= HEALTH_MAX_ATTEMPTS) {
+            if (signal?.aborted) return
+            setState('offline')
+            setDetail(isAbort && !timedOut ? msg : `Backend did not wake in ~2 min — last: ${msg}`.slice(0, 120))
+            return
+          }
+          // Wait before next attempt (abort-aware so unmount/recheck stays responsive)
+          await sleep(HEALTH_RETRY_DELAY_MS, signal)
+        } finally {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', onOuterAbort)
+        }
+      }
+    } finally {
+      inFlightRef.current = false
     }
   }, [])
   useEffect(() => {
     const ac = new AbortController()
     check(ac.signal)
-    const id = setInterval(() => check(), 15000)
+    const id = setInterval(() => {
+      if (!document.hidden) check()
+    }, 30000)
     return () => {
       ac.abort()
       clearInterval(id)
@@ -406,7 +471,7 @@ export default function App() {
           <div className="flex items-center gap-3 text-xs" role="status" aria-live="polite" aria-label="Backend health">
             <span className={`h-2 w-2 rounded-full ${health.state === 'ok' ? 'bg-[var(--verified)]' : health.state === 'offline' ? 'bg-[var(--rust)]' : 'bg-[var(--brass)]'}`} aria-hidden />
             <span className={`font-medium ${health.state === 'ok' ? 'text-[var(--verified)]' : health.state === 'offline' ? 'text-[var(--rust)]' : 'text-[var(--slate)]'}`}>
-              {health.state === 'checking' ? 'Checking…' : health.state === 'ok' ? `Online · ${health.detail}` : `Offline · ${health.detail.slice(0,60)}`}
+              {health.state === 'checking' ? `Checking… · ${health.detail}` : health.state === 'waking' ? `Waking server… · ${health.detail}` : health.state === 'ok' ? `Online · ${health.detail}` : `Offline · ${health.detail.slice(0,60)}`}
             </span>
             <button onClick={() => health.check()} className="rounded border border-[var(--hairline)] bg-white px-2.5 py-1 text-xs font-medium text-[var(--slate)] hover:bg-[var(--paper)]" aria-label="Recheck health">Check</button>
           </div>
