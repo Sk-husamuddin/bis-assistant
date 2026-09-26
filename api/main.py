@@ -31,10 +31,18 @@ app = FastAPI(title="BIS Intelligent Assistant", version="1.0.0")
 app.include_router(speak_router)
 app.include_router(transcribe_router)
 
+FRONTEND_ORIGINS = [
+    "https://bis-assistant-pied.vercel.app",
+    "https://bis-assistant-1.onrender.com",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:8000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=FRONTEND_ORIGINS + ["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
